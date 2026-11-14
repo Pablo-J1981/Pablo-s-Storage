@@ -1,0 +1,679 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AGV/AMR 시뮬레이터 — 디지털 트윈 설계·검증 플랫폼</title>
+<meta name="description" content="물리 기반 주행·교통 혼잡·큐잉 이론·몬테카를로 실험을 통합한 차세대 AGV/AMR 물류 Capa 시뮬레이터">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable.min.css" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Nanum+Gothic:wght@400;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🤖</text></svg>">
+</head>
+<body class="theme-hanwha">
+
+<input type="file" id="fileLayout" accept=".json" class="sr-only">
+<input type="file" id="fileCsv" accept=".csv,.txt" class="sr-only">
+<input type="file" id="fileCad" accept=".dxf,.png,.jpg,.jpeg,.svg" class="sr-only">
+
+<div class="app">
+
+  <!-- ══════════════ HEADER ══════════════ -->
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">🤖</div>
+      <div class="brand-text">
+        <div class="brand-title">
+          Pablo.J > AGV/AMR 시뮬레이터
+          <span class="brand-badge">ver.2026-01</span>
+        </div>
+        <div class="brand-sub">물리 주행 · 교통 혼잡 · 큐잉 이론 · 몬테카를로 기반 시뮬레이터</div>
+      </div>
+    </div>
+
+    <div class="topbar-actions">
+      <select id="presetSelect" style="width:auto;min-width:168px" aria-label="레이아웃 프리셋"></select>
+      <button class="btn primary" id="btnLoadPreset">🏭 <span class="lbl">맵 적용</span></button>
+      <button class="btn" id="btnSave">💾 <span class="lbl">저장</span></button>
+      <button class="btn" id="btnLoad">📂 <span class="lbl">불러오기</span></button>
+      <button class="btn" id="btnReport">📑 <span class="lbl">리포트</span></button>
+      <button class="btn" id="btnHelp" title="사용 가이드">❓</button>
+      <select id="themeSelect" style="width:auto" aria-label="테마">
+        <option value="theme-hanwha">🟠 한화 ICT</option>
+        <option value="theme-light">⚪ 클린 라이트</option>
+        <option value="theme-dark">⚫ 다크</option>
+        <option value="theme-midnight">🔵 미드나이트</option>
+      </select>
+    </div>
+  </header>
+
+  <!-- ══════════════ MAIN ══════════════ -->
+  <div class="main" id="mainGrid">
+
+    <!-- ───────── LEFT: 설계 파라미터 ───────── -->
+    <section class="panel" id="leftPanel" aria-label="설계 파라미터">
+      <nav class="tabs" role="tablist">
+        <button class="tab active" data-pane="p-demand">📦 수요</button>
+        <button class="tab" data-pane="p-vehicle">🚗 차량</button>
+        <button class="tab" data-pane="p-energy">🔋 에너지</button>
+        <button class="tab" data-pane="p-traffic">🧠 배차·교통</button>
+        <button class="tab" data-pane="p-cost">💰 비용</button>
+      </nav>
+
+      <div class="tab-body">
+
+        <!-- ===== 수요 ===== -->
+        <div class="pane active" id="p-demand">
+          <div class="hint">
+            💡 <b>수요 생성기</b> — 배출 주기와 변동계수(CV)로 현실적인 <b>불규칙 도착</b>을 모사합니다.
+            CV=0은 완전 규칙(결정론), CV=0.6은 실제 물류 현장의 일반적 변동 수준입니다.
+          </div>
+
+          <div class="card-box">
+            <div class="row between mb">
+              <span style="font-size:11.5px;font-weight:800">자동 화물 배출</span>
+              <label class="switch">
+                <input type="checkbox" id="chkAutoRelease" checked>
+                <span id="txtAutoRelease" style="color:var(--ok)">ON</span>
+              </label>
+            </div>
+            <div class="field mb">
+              <label>배출 주기 적용 기준</label>
+              <select id="selReleaseMode">
+                <option value="total">공장 전체 — 전 피킹대 통합 N초마다 1건</option>
+                <option value="per_station">개별 피킹대 — 각 피킹대 독립 N초마다 1건</option>
+              </select>
+            </div>
+            <div data-param="release_interval"></div>
+            <div data-param="demand_cv"></div>
+            <div data-param="peak_ratio"></div>
+
+            <div class="card-box" style="margin:8px 0 0;background:var(--surface-3)">
+              <div class="row between tiny"><span class="muted">설계 유입량 (수요)</span><b id="txtDemandUph" class="mono" style="color:var(--accent)">144 UPH</b></div>
+              <div class="row between tiny mt" style="margin-top:3px"><span class="muted">피킹 포트 물리한계</span><b id="txtPickLimit" class="mono" style="color:var(--warn)">— UPH</b></div>
+              <div class="row between tiny" style="margin-top:3px"><span class="muted">드롭 포트 물리한계</span><b id="txtDropLimit" class="mono" style="color:var(--warn)">— UPH</b></div>
+              <div class="row between tiny" style="margin-top:5px"><span class="muted">다음 배출까지</span><b id="txtCountdown" class="mono">—</b></div>
+              <div class="bar" style="margin-top:3px"><span id="barRelease" style="width:0%;background:var(--accent)"></span></div>
+            </div>
+          </div>
+
+          <div class="section-title">작업 수동 투입</div>
+          <div class="row mb">
+            <button class="btn sm grow" id="btnAdd20">🎲 랜덤 20건</button>
+            <button class="btn sm grow" id="btnCsvUp">📥 CSV 업로드</button>
+            <button class="btn sm" id="btnCsvSample" title="CSV 서식 샘플">📄</button>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:6px" class="mb">
+            <div class="field"><label>From (피킹)</label><select id="selFrom"></select></div>
+            <div class="field"><label>To (드롭)</label><select id="selTo"></select></div>
+            <div class="field"><label>&nbsp;</label><button class="btn sm" id="btnAddJob">등록</button></div>
+          </div>
+
+          <div class="section-title">
+            작업 대기열
+            <button class="btn xs" id="btnClearJobs" style="margin-left:auto">비우기</button>
+          </div>
+          <div class="chips" id="jobChips"></div>
+          <div class="table-wrap" style="max-height:230px">
+            <table>
+              <thead><tr><th>Job</th><th>구간</th><th>상태</th><th>담당</th><th class="num">대기</th></tr></thead>
+              <tbody id="jobTable"><tr><td colspan="5" class="empty-row">작업 없음</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- ===== 차량 ===== -->
+        <div class="pane" id="p-vehicle">
+          <div class="hint">
+            🚗 <b>물리 기반 주행 모델</b> — 등속 근사가 아닌 <b>사다리꼴 속도 프로파일</b>(가속→정속→감속)과
+            선회 감속, 차간 안전거리를 적용해 실제 사이클 타임을 재현합니다.
+          </div>
+          <div class="section-title">주행 성능</div>
+          <div data-param="v_max"></div>
+          <div data-param="accel"></div>
+          <div data-param="decel"></div>
+          <div data-param="turn_speed"></div>
+          <div data-param="turn_thresh"></div>
+          <div data-param="safety_gap"></div>
+          <div data-param="payload"></div>
+
+          <div class="section-title">포트 / 하역</div>
+          <div data-param="t_pick"></div>
+          <div data-param="t_drop"></div>
+          <div data-param="cv_service"></div>
+          <div data-param="port_cap"></div>
+
+          <div class="section-title">현장 설정</div>
+          <div data-param="pixel_scale"></div>
+          <div data-param="fleet"></div>
+          <div data-param="oee"></div>
+          <div data-param="shift_hours"></div>
+
+          <div class="card-box">
+            <label class="switch mb"><input type="checkbox" id="chkFailures"> 고장/복구 모델 활성화 (MTBF·MTTR)</label>
+            <div data-param="mtbf"></div>
+            <div data-param="mttr"></div>
+          </div>
+        </div>
+
+        <!-- ===== 에너지 ===== -->
+        <div class="pane" id="p-energy">
+          <div class="hint">
+            🔋 <b>에너지 수지 모델</b> — "분당 %" 추정이 아니라 <b>실제 소비전력(W) × 주행시간 ÷ 배터리 용량(kWh)</b>으로
+            SoC를 계산합니다. 적재 시 추가 전력까지 반영해 충전 인프라 소요량을 정확히 산출합니다.
+          </div>
+          <div class="section-title">SoC 운영 정책</div>
+          <div class="field mb">
+            <label>충전 정책</label>
+            <select id="selChargePolicy">
+              <option value="threshold">임계 충전 — 하한 도달 시에만 복귀</option>
+              <option value="opportunity">기회 충전 — 유휴 시 적극 충전</option>
+            </select>
+          </div>
+          <div data-param="bat_min"></div>
+          <div data-param="bat_max"></div>
+          <div data-param="opportunity"></div>
+
+          <div class="section-title">전력 사양</div>
+          <div data-param="bat_kwh"></div>
+          <div data-param="p_move"></div>
+          <div data-param="p_load_add"></div>
+          <div data-param="p_idle"></div>
+          <div data-param="charge_kw"></div>
+
+          <div class="card-box">
+            <div class="section-title" style="margin-top:0">에너지 수지 진단</div>
+            <div id="energyDiag" class="tiny muted">시뮬레이션 실행 중 계산됩니다.</div>
+          </div>
+        </div>
+
+        <!-- ===== 배차·교통 ===== -->
+        <div class="pane" id="p-traffic">
+          <div class="hint">
+            🧠 <b>전역 최적 배차</b> — 헝가리안 알고리즘으로 유휴 차량×대기 작업 전체를 하나의
+            할당 문제로 풀어 <b>총 공차 주행을 최소화</b>합니다. 탐욕 배차 대비 공차거리 10~25% 절감.
+          </div>
+          <div class="section-title">배차 알고리즘</div>
+          <div class="field mb"><select id="selDispatch"></select></div>
+          <div class="hint" id="dispatchDesc"></div>
+
+          <div class="section-title">교통 / 충돌 회피 모델</div>
+          <div class="field mb">
+            <label>통행 제어 방식</label>
+            <select id="selTraffic">
+              <option value="reservation">간선 예약제 — 구간 단위 점유 잠금 (가장 현실적)</option>
+              <option value="softgap">차간거리 제어 — 추종 감속만 적용</option>
+              <option value="none">이상화 — 충돌·정체 없음 (이론 상한)</option>
+            </select>
+          </div>
+          <label class="switch mb"><input type="checkbox" id="chkBidir" checked> 양방향 간선 통행 허용 (해제 시 일방통행만)</label>
+          <div class="card-box">
+            <div class="row between tiny"><span class="muted">통로 총 연장</span><b id="txtLaneLen" class="mono">—</b></div>
+            <div class="row between tiny" style="margin-top:3px"><span class="muted">현재 차량 밀도</span><b id="txtDensity" class="mono">—</b></div>
+            <div class="row between tiny" style="margin-top:3px"><span class="muted">예측 유효속도 계수</span><b id="txtCongFactor" class="mono" style="color:var(--warn)">—</b></div>
+          </div>
+
+          <div class="section-title">재현성 (Reproducibility)</div>
+          <div class="card-box">
+            <div class="row mb">
+              <div class="field grow"><label>난수 시드 (Seed)</label><input type="number" id="inpSeed" value="20260101"></div>
+              <div class="field"><label>&nbsp;</label><button class="btn sm" id="btnReseed">🎲 변경</button></div>
+            </div>
+            <div class="tiny muted">동일 시드 + 동일 파라미터 = 완전히 동일한 결과. 실험 결과 검증·공유에 필수입니다.</div>
+          </div>
+        </div>
+
+        <!-- ===== 비용 ===== -->
+        <div class="pane" id="p-cost">
+          <div class="hint">💰 도입 타당성(ROI) 분석 입력값입니다. 우측 <b>경제성</b> 탭에서 손익분기·대당 처리원가를 확인하세요.</div>
+          <div data-param="cost_amr"></div>
+          <div data-param="cost_oper"></div>
+          <div data-param="labor_cost"></div>
+          <div data-param="labor_uph"></div>
+          <div class="card-box">
+            <div class="section-title" style="margin-top:0">빠른 요약</div>
+            <div id="costQuick" class="tiny muted">—</div>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ───────── CENTER: 맵 & 시뮬레이션 ───────── -->
+    <section class="panel sim-panel" aria-label="시뮬레이션 맵">
+
+      <div class="toolbar">
+        <div class="tool-group">
+          <span class="tool-label">편집</span>
+          <button class="tool active" data-tool="select" title="선택·드래그 이동">👆</button>
+          <button class="tool" data-tool="pan" title="화면 이동 (우클릭 드래그도 가능)">✋</button>
+          <button class="tool" data-tool="pick" title="피킹 스테이션 배치">🟢 픽업</button>
+          <button class="tool" data-tool="drop" title="드롭 스테이션 배치">🟠 드롭</button>
+          <button class="tool" data-tool="charge" title="충전소 배치">⚡ 충전</button>
+          <button class="tool" data-tool="park" title="대기존 배치">🅿 대기</button>
+          <button class="tool" data-tool="waypoint" title="경유 노드 배치">⚪ 노드</button>
+          <button class="tool" data-tool="edge" title="두 노드를 연결해 통로 생성">🔗 연결</button>
+          <button class="tool" data-tool="delete" title="노드/통로 삭제">🗑</button>
+        </div>
+        <div class="tool-group">
+          <span class="tool-label">보기</span>
+          <button class="tool" id="btnZoomIn" title="확대">🔍+</button>
+          <button class="tool" id="btnZoomOut" title="축소">🔍−</button>
+          <button class="tool" id="btnFit" title="전체 맞춤">⤢ 맞춤</button>
+          <button class="tool active" data-view="heat" title="혼잡 히트맵">🔥 혼잡</button>
+          <button class="tool active" data-view="dist" title="구간 거리 라벨">📏 거리</button>
+          <button class="tool" data-view="trails" title="주행 경로 표시">〰 경로</button>
+          <button class="tool active" data-view="grid" title="격자">▦</button>
+        </div>
+        <div class="tool-group">
+          <button class="tool" id="btnAutoLink" title="가까운 노드를 자동 연결">🪄 자동연결</button>
+          <button class="tool" id="btnClearMap" title="맵 비우기">🧹 초기화</button>
+        </div>
+      </div>
+
+      <div class="toolbar" style="background:transparent">
+        <div class="tool-group">
+          <button class="btn primary sm" id="btnPlay">⏸ 일시정지</button>
+          <button class="btn sm" id="btnStep" title="1초 단위 스텝 진행">⏭ 스텝</button>
+          <button class="btn sm" id="btnResetSim">🔄 시뮬 리셋</button>
+        </div>
+        <div class="tool-group">
+          <span class="tool-label">배속</span>
+          <button class="tool" data-speed="1">1×</button>
+          <button class="tool active" data-speed="4">4×</button>
+          <button class="tool" data-speed="10">10×</button>
+          <button class="tool" data-speed="30">30×</button>
+          <button class="tool" data-speed="120">120×</button>
+        </div>
+        <div class="tool-group grow" style="justify-content:flex-end">
+          <span class="tool-label" id="warmupNote">워밍업 이후 정상상태 지표가 안정화됩니다</span>
+        </div>
+      </div>
+
+      <div class="canvas-wrap" id="canvasWrap">
+        <canvas id="simCanvas" aria-label="공장 레이아웃 시뮬레이션 맵"></canvas>
+
+        <div class="canvas-float">
+          <div class="canvas-badge">⏱ <b id="hudTime">00:00:00</b> · <span id="hudSpeed">4×</span></div>
+          <div class="canvas-badge">📊 실측 <b id="hudUph">0</b> UPH</div>
+          <div class="canvas-badge">🤖 가동 <b id="hudActive">0</b> / 충전 <b id="hudCharge">0</b></div>
+        </div>
+
+        <div class="inspector" id="inspector">
+          <h5><span id="inspTitle">노드</span><button class="close-x" id="inspClose" style="width:20px;height:20px;font-size:12px">✕</button></h5>
+          <div id="inspBody"></div>
+          <div class="insp-actions">
+            <button class="btn xs grow" id="inspRename">✏ 이름</button>
+            <button class="btn xs grow" id="inspPriority">⚖ 가중치</button>
+            <button class="btn xs danger" id="inspDelete">🗑</button>
+          </div>
+        </div>
+
+        <button class="float-btn" id="floatLeft">▶ 파라미터</button>
+        <button class="float-btn" id="floatRight">◀ 분석</button>
+      </div>
+
+      <div class="statusbar">
+        <div class="stat"><div class="stat-label">시뮬레이션 시간</div><div class="stat-value" id="stTime">00:00:00</div></div>
+        <div class="stat"><div class="stat-label">실측 처리량</div><div class="stat-value" id="stUph" style="color:var(--ok)">0 UPH</div></div>
+        <div class="stat"><div class="stat-label">서비스율</div><div class="stat-value" id="stService">—</div></div>
+        <div class="stat"><div class="stat-label">평균 사이클</div><div class="stat-value" id="stCycle">—</div></div>
+        <div class="stat"><div class="stat-label">가동률</div><div class="stat-value" id="stUtil" style="color:var(--accent)">0%</div></div>
+        <div class="stat"><div class="stat-label">정체 손실</div><div class="stat-value" id="stBlock" style="color:var(--warn)">0%</div></div>
+        <div class="stat"><div class="stat-label">WIP (재공)</div><div class="stat-value" id="stWip">0</div></div>
+        <div class="stat"><div class="stat-label">완료 / 발생</div><div class="stat-value" id="stDone">0 / 0</div></div>
+      </div>
+    </section>
+
+    <!-- ───────── RIGHT: 분석 ───────── -->
+    <section class="panel" id="rightPanel" aria-label="분석 대시보드">
+      <nav class="tabs" role="tablist">
+        <button class="tab active" data-pane="r-overview">📊 총괄</button>
+        <button class="tab" data-pane="r-matrix">📏 거리</button>
+        <button class="tab" data-pane="r-fleet">🤖 관제</button>
+        <button class="tab" data-pane="r-curve">📈 감도</button>
+        <button class="tab" data-pane="r-lab">🧪 실험실</button>
+        <button class="tab" data-pane="r-eco">💰 경제성</button>
+        <div style="display:flex;align-items:center;gap:3px;padding:0 5px;margin-left:auto">
+          <button class="btn xs" id="btnWide" title="패널 넓게">↔</button>
+          <button class="btn xs" id="btnStudio" title="전체화면 스튜디오">⛶</button>
+          <button class="btn xs" id="btnCollapseRight" title="접기">⇥</button>
+        </div>
+      </nav>
+
+      <div class="tab-body">
+
+        <!-- ===== 총괄 ===== -->
+        <div class="pane active" id="r-overview">
+          <div class="kpi-hero">
+            <div class="kpi-hero-label">목표 수요 충족에 필요한 AMR 대수 (혼잡·큐잉 반영)</div>
+            <div class="kpi-hero-value" id="kpiReqFleet">— <small>대</small></div>
+            <div class="kpi-hero-sub" id="kpiReqSub">—</div>
+          </div>
+
+          <div class="kpi-grid c2">
+            <div class="kpi"><div class="kpi-label">실측 사이클 타임</div><div class="kpi-value" id="kpiCycle">—</div><div class="kpi-delta" id="kpiCycleSub">—</div></div>
+            <div class="kpi"><div class="kpi-label">P90 사이클 (꼬리)</div><div class="kpi-value" id="kpiP90">—</div><div class="kpi-delta">상위 10% 지연</div></div>
+            <div class="kpi"><div class="kpi-label">포트 대기 비중</div><div class="kpi-value" id="kpiQueue" style="color:var(--warn)">—</div><div class="kpi-delta">사이클 대비</div></div>
+            <div class="kpi"><div class="kpi-label">교통 정체 손실</div><div class="kpi-value" id="kpiBlock" style="color:var(--err)">—</div><div class="kpi-delta">주행시간 대비</div></div>
+            <div class="kpi"><div class="kpi-label">서비스율 (수요 충족)</div><div class="kpi-value" id="kpiService" style="color:var(--ok)">—</div><div class="kpi-delta" id="kpiServiceSub">—</div></div>
+            <div class="kpi"><div class="kpi-label">적재 주행 비율</div><div class="kpi-value" id="kpiLoaded">—</div><div class="kpi-delta">공차 최소화 지표</div></div>
+          </div>
+
+          <div class="section-title">🩺 자동 병목 진단</div>
+          <div class="diag" id="diagList"></div>
+
+          <div class="collapse" id="colCurve">
+            <div class="collapse-head" data-collapse><span>📈 투입 대수별 처리량 곡선</span><span class="arrow">▼</span></div>
+            <div class="collapse-body"><div class="chart-area short"><canvas id="chartMini"></canvas></div></div>
+          </div>
+
+          <div class="collapse" id="colTime">
+            <div class="collapse-head" data-collapse><span>⏱ 실시간 추이 (처리량·WIP·가동률)</span><span class="arrow">▼</span></div>
+            <div class="collapse-body"><div class="chart-area short"><canvas id="chartTime"></canvas></div></div>
+          </div>
+
+          <div class="collapse closed" id="colPort">
+            <div class="collapse-head" data-collapse><span>🚦 스테이션별 부하 현황</span><span class="arrow">▼</span></div>
+            <div class="collapse-body">
+              <div class="table-wrap" style="max-height:190px">
+                <table>
+                  <thead><tr><th>스테이션</th><th class="num">적체</th><th class="num">처리</th><th class="num">점유</th><th class="num">누적대기</th></tr></thead>
+                  <tbody id="portTable"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ===== 거리 매트릭스 ===== -->
+        <div class="pane" id="r-matrix">
+          <div class="row between mb">
+            <div>
+              <div style="font-size:12.5px;font-weight:800">📏 From-To 경로 정밀 매트릭스</div>
+              <div class="tiny muted" id="matrixSummary">Dijkstra 실측 경로 · 사다리꼴 속도 프로파일 기반 소요시간</div>
+            </div>
+            <button class="btn sm" id="btnMatrixCsv">📥 CSV</button>
+          </div>
+          <div class="chips" id="matrixChips"></div>
+          <div class="table-wrap" style="max-height:calc(100vh - 290px)">
+            <table>
+              <thead>
+                <tr>
+                  <th>출발</th><th>도착</th>
+                  <th class="num">적재거리</th><th class="num">복귀거리</th>
+                  <th class="num">주행시간</th><th class="num">왕복사이클</th>
+                  <th class="num">선회</th><th>상태</th>
+                </tr>
+              </thead>
+              <tbody id="matrixTable"></tbody>
+            </table>
+          </div>
+          <div class="tiny muted mt">
+            * <b>주행시간</b>은 가속 <span id="mxAcc">—</span> / 최고속 <span id="mxVel">—</span> / 감속 <span id="mxDec">—</span> 사다리꼴 프로파일과
+            누적 선회각(선회속도 <span id="mxTurn">—</span>)을 함께 반영한 값입니다.
+          </div>
+        </div>
+
+        <!-- ===== 플릿 관제 ===== -->
+        <div class="pane" id="r-fleet">
+          <div class="row between mb">
+            <div>
+              <div style="font-size:12.5px;font-weight:800">🤖 AMR 플릿 실시간 관제</div>
+              <div class="tiny muted">SoC · 상태 · 미션 · 누적 주행 · 개별 가동률</div>
+            </div>
+            <div class="row">
+              <button class="btn xs" id="btnFleetMinus">− 감차</button>
+              <button class="btn xs" id="btnFleetPlus">+ 증차</button>
+            </div>
+          </div>
+          <div class="chips" id="fleetChips"></div>
+          <div class="chart-box">
+            <div class="chart-title">상태 분포</div>
+            <div class="chart-area short"><canvas id="chartState"></canvas></div>
+          </div>
+          <div class="table-wrap" style="max-height:calc(100vh - 430px)">
+            <table>
+              <thead><tr><th>ID</th><th>상태</th><th>SoC</th><th class="num">가동률</th><th class="num">완료</th><th>미션</th></tr></thead>
+              <tbody id="fleetTable"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- ===== 감도 분석 ===== -->
+        <div class="pane" id="r-curve">
+          <div class="row between mb">
+            <div>
+              <div style="font-size:12.5px;font-weight:800">📈 Capa 감도 분석</div>
+              <div class="tiny muted">혼잡 체감·포트 큐잉을 반영한 비선형 처리량 예측</div>
+            </div>
+            <button class="btn sm" id="btnCurveCsv">📥 CSV</button>
+          </div>
+          <div class="chart-box">
+            <div class="chart-title">투입 대수 vs 처리량 / 사이클타임</div>
+            <div class="chart-area tall"><canvas id="chartCurve"></canvas></div>
+          </div>
+          <div class="hint" id="curveInsight">—</div>
+          <div class="table-wrap" style="max-height:230px">
+            <table>
+              <thead><tr><th class="num">대수</th><th class="num">처리량</th><th class="num">사이클</th><th class="num">포트대기</th><th class="num">속도계수</th><th>제약 요인</th></tr></thead>
+              <tbody id="curveTable"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- ===== 실험실 ===== -->
+        <div class="pane" id="r-lab">
+          <div class="hint">
+            🧪 <b>실험실</b> — ①파라미터 스윕으로 민감도를, ②몬테카를로로 통계적 신뢰구간을,
+            ③시나리오 비교로 대안 설계안을 동시에 평가합니다.
+          </div>
+
+          <div class="section-title">① 파라미터 스윕 (민감도 분석)</div>
+          <div class="card-box">
+            <div class="field mb"><label>분석 대상 변수</label><select id="sweepKey"></select></div>
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px" class="mb">
+              <div class="field"><label>시작</label><input type="number" id="sweepFrom" step="any"></div>
+              <div class="field"><label>종료</label><input type="number" id="sweepTo" step="any"></div>
+              <div class="field"><label>분할</label><input type="number" id="sweepSteps" value="14" min="3" max="40"></div>
+            </div>
+            <button class="btn primary sm" id="btnSweep" style="width:100%">⚡ 스윕 실행 (즉시)</button>
+          </div>
+          <div class="chart-box" id="sweepBox" style="display:none">
+            <div class="chart-title"><span id="sweepTitle">결과</span><button class="btn xs" id="btnSweepCsv">📥 CSV</button></div>
+            <div class="chart-area"><canvas id="chartSweep"></canvas></div>
+            <div class="tiny muted mt" id="sweepInsight"></div>
+          </div>
+
+          <div class="section-title">② 몬테카를로 반복 시뮬레이션</div>
+          <div class="card-box">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px" class="mb">
+              <div class="field"><label>반복 횟수 (시드)</label><input type="number" id="mcRuns" value="6" min="1" max="30"></div>
+              <div class="field"><label>1회 시뮬 시간 (분)</label><input type="number" id="mcHorizon" value="45" min="5" max="300"></div>
+            </div>
+            <button class="btn primary sm" id="btnMonteCarlo" style="width:100%">🎲 몬테카를로 실행</button>
+            <div class="progress" id="mcProgress" style="display:none"><span style="width:0%"></span></div>
+            <div class="tiny muted" id="mcStatus"></div>
+          </div>
+          <div id="mcResult" style="display:none">
+            <div class="kpi-grid c2" id="mcKpis"></div>
+            <div class="chart-box">
+              <div class="chart-title">반복별 처리량 분포 (신뢰구간)</div>
+              <div class="chart-area short"><canvas id="chartMc"></canvas></div>
+            </div>
+          </div>
+
+          <div class="section-title">③ 시나리오 비교 (A/B/C)</div>
+          <div class="card-box">
+            <div class="tiny muted mb">현재 설정을 슬롯에 저장하고 설계 대안을 나란히 비교합니다.</div>
+            <div class="row mb">
+              <button class="btn sm grow" data-snap="A">A 저장</button>
+              <button class="btn sm grow" data-snap="B">B 저장</button>
+              <button class="btn sm grow" data-snap="C">C 저장</button>
+              <button class="btn sm danger" id="btnClearSnap">초기화</button>
+            </div>
+            <div class="scenario-grid" id="scenarioGrid"></div>
+          </div>
+        </div>
+
+        <!-- ===== 경제성 ===== -->
+        <div class="pane" id="r-eco">
+          <div class="row between mb">
+            <div>
+              <div style="font-size:12.5px;font-weight:800">💰 도입 타당성 분석 (ROI)</div>
+              <div class="tiny muted">투자비·운영비 대비 인력 대체 효과 및 손익분기</div>
+            </div>
+          </div>
+          <div class="kpi-hero">
+            <div class="kpi-hero-label">투자 회수 기간 (Payback Period)</div>
+            <div class="kpi-hero-value" id="ecoPayback">— <small>년</small></div>
+            <div class="kpi-hero-sub" id="ecoPaybackSub">—</div>
+          </div>
+          <div class="kpi-grid c2">
+            <div class="kpi"><div class="kpi-label">초기 투자비 (CAPEX)</div><div class="kpi-value sm" id="ecoCapex">—</div></div>
+            <div class="kpi"><div class="kpi-label">연간 운영비 (OPEX)</div><div class="kpi-value sm" id="ecoOpex">—</div></div>
+            <div class="kpi"><div class="kpi-label">연간 절감액 (Net)</div><div class="kpi-value sm" id="ecoSave" style="color:var(--ok)">—</div></div>
+            <div class="kpi"><div class="kpi-label">5년 누적 ROI</div><div class="kpi-value sm" id="ecoRoi">—</div></div>
+            <div class="kpi"><div class="kpi-label">건당 처리 원가</div><div class="kpi-value sm" id="ecoCpt">—</div></div>
+            <div class="kpi"><div class="kpi-label">대체 인력 환산</div><div class="kpi-value sm" id="ecoLabor">—</div></div>
+          </div>
+          <div class="chart-box">
+            <div class="chart-title">투입 대수별 경제성 (건당 원가 vs 회수기간)</div>
+            <div class="chart-area"><canvas id="chartEco"></canvas></div>
+          </div>
+          <div class="hint" id="ecoInsight">—</div>
+          <div class="table-wrap" style="max-height:220px">
+            <table>
+              <thead><tr><th class="num">대수</th><th class="num">UPH</th><th class="num">CAPEX</th><th class="num">연절감</th><th class="num">회수</th><th class="num">건당원가</th></tr></thead>
+              <tbody id="ecoTable"></tbody>
+            </table>
+          </div>
+        </div>
+
+      </div>
+    </section>
+  </div>
+</div>
+
+<!-- ══════════════ STUDIO MODAL ══════════════ -->
+<div class="modal" id="studioModal">
+  <div class="modal-box">
+    <div class="modal-head">
+      <div class="modal-title">⛶ 분석 스튜디오 — 전체화면 정밀 분석</div>
+      <div class="row">
+        <button class="btn sm" id="btnStudioCsv">📥 전체 CSV</button>
+        <button class="close-x" data-close-modal>✕</button>
+      </div>
+    </div>
+    <nav class="tabs">
+      <button class="tab active" data-pane="s-matrix">📏 거리 매트릭스</button>
+      <button class="tab" data-pane="s-curve">📈 감도 곡선</button>
+      <button class="tab" data-pane="s-fleet">🤖 플릿 관제</button>
+      <button class="tab" data-pane="s-time">⏱ 시계열</button>
+    </nav>
+    <div class="modal-body">
+      <div class="pane active" id="s-matrix">
+        <div class="table-wrap" style="max-height:calc(96vh - 190px)">
+          <table>
+            <thead><tr><th>출발</th><th>도착</th><th class="num">적재거리</th><th class="num">복귀거리</th><th class="num">주행시간</th><th class="num">왕복사이클</th><th class="num">선회각</th><th>경유 경로</th><th>상태</th></tr></thead>
+            <tbody id="studioMatrix"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="pane" id="s-curve">
+        <div class="chart-box"><div class="chart-area" style="height:46vh"><canvas id="chartCurveBig"></canvas></div></div>
+        <div class="table-wrap" style="max-height:30vh">
+          <table>
+            <thead><tr><th class="num">대수</th><th class="num">처리량</th><th class="num">사이클</th><th class="num">포트대기</th><th class="num">속도계수</th><th>제약</th><th class="num">한계대비</th></tr></thead>
+            <tbody id="studioCurve"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="pane" id="s-fleet">
+        <div class="table-wrap" style="max-height:calc(96vh - 190px)">
+          <table>
+            <thead><tr><th>ID</th><th>상태</th><th>SoC</th><th class="num">가동률</th><th class="num">정체율</th><th class="num">주행거리</th><th class="num">에너지</th><th class="num">완료</th><th>현재 미션</th></tr></thead>
+            <tbody id="studioFleet"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="pane" id="s-time">
+        <div class="chart-box"><div class="chart-title">처리량 / WIP / 가동률 추이</div><div class="chart-area" style="height:40vh"><canvas id="chartTimeBig"></canvas></div></div>
+        <div class="chart-box"><div class="chart-title">스테이션별 부하</div><div class="chart-area" style="height:28vh"><canvas id="chartPort"></canvas></div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════ HELP MODAL ══════════════ -->
+<div class="modal" id="helpModal">
+  <div class="modal-box narrow">
+    <div class="modal-head">
+      <div class="modal-title">❓ 사용 가이드</div>
+      <button class="close-x" data-close-modal>✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="section-title" style="margin-top:0">기본 워크플로</div>
+      <ol style="padding-left:18px;font-size:12px;line-height:1.85;color:var(--text-dim)">
+        <li><b>맵 구성</b> — 상단에서 프리셋을 적용하거나, 편집 도구로 직접 배치·연결합니다.</li>
+        <li><b>수요 설정</b> — 좌측 <b>📦 수요</b> 탭에서 배출 주기·변동(CV)을 입력합니다.</li>
+        <li><b>사양 입력</b> — <b>🚗 차량</b> / <b>🔋 에너지</b> 탭에 실제 장비 스펙을 넣습니다.</li>
+        <li><b>실행·관찰</b> — 배속을 올려 정상상태까지 돌린 뒤 우측 <b>📊 총괄</b>의 진단을 확인합니다.</li>
+        <li><b>검증</b> — <b>🧪 실험실</b>에서 스윕·몬테카를로로 통계적 신뢰도를 확보합니다.</li>
+        <li><b>의사결정</b> — <b>💰 경제성</b>에서 회수기간을 확인하고 📑 리포트로 내보냅니다.</li>
+      </ol>
+
+      <div class="section-title">맵 편집 조작</div>
+      <table style="font-size:11.5px">
+        <tbody>
+          <tr><td class="strong">휠 스크롤</td><td>커서 기준 확대/축소</td></tr>
+          <tr><td class="strong">우클릭 드래그</td><td>화면 이동 (Pan)</td></tr>
+          <tr><td class="strong">선택 도구 + 드래그</td><td>노드 위치 이동</td></tr>
+          <tr><td class="strong">노드 클릭</td><td>인스펙터 열기 (이름·가중치·삭제)</td></tr>
+          <tr><td class="strong">연결 도구</td><td>노드 A → 노드 B 순서로 클릭</td></tr>
+          <tr><td class="strong">연결 + Shift</td><td>일방통행 간선 생성</td></tr>
+          <tr><td class="strong">삭제 도구</td><td>노드 또는 통로 선을 클릭</td></tr>
+        </tbody>
+      </table>
+
+      <div class="section-title">단축키</div>
+      <table style="font-size:11.5px">
+        <tbody>
+          <tr><td class="strong">Space</td><td>재생 / 일시정지</td></tr>
+          <tr><td class="strong">1 ~ 5</td><td>배속 전환 (1× ~ 120×)</td></tr>
+          <tr><td class="strong">V / H / P / D / C / N / E / X</td><td>선택·이동·픽업·드롭·충전·노드·연결·삭제 도구</td></tr>
+          <tr><td class="strong">F</td><td>맵 전체 맞춤</td></tr>
+          <tr><td class="strong">[ / ]</td><td>좌측 / 우측 패널 접기</td></tr>
+          <tr><td class="strong">Esc</td><td>모달 닫기 · 선택 해제</td></tr>
+        </tbody>
+      </table>
+
+      <div class="section-title">계산 모델 근거</div>
+      <ul style="padding-left:18px;font-size:11.5px;line-height:1.8;color:var(--text-dim)">
+        <li><b>주행</b> — 사다리꼴 속도 프로파일: 거리가 짧으면 삼각 프로파일로 자동 전환</li>
+        <li><b>혼잡</b> — Greenshields 밀도-속도 관계 + 교차점 간섭 보정</li>
+        <li><b>포트 대기</b> — Erlang-C(M/M/c) 대기행렬로 해석 추정, 반복 수렴 적용</li>
+        <li><b>배터리</b> — 소비전력(W) × 시간 ÷ 용량(kWh) 에너지 수지</li>
+        <li><b>배차</b> — 헝가리안 O(n³) 전역 최적 할당</li>
+      </ul>
+    </div>
+    <div class="modal-foot"><button class="btn primary" data-close-modal>확인</button></div>
+  </div>
+</div>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="js/util.js"></script>
+<script src="js/model.js"></script>
+<script src="js/graph.js"></script>
+<script src="js/dispatch.js"></script>
+<script src="js/engine.js"></script>
+<script src="js/renderer.js"></script>
+<script src="js/analytics.js"></script>
+<script src="js/charts.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
