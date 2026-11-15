@@ -11,6 +11,7 @@
   /* =======================================================
    * 1) 해석적 사이클 타임 모델
    *    실제 레이아웃 From-To 매트릭스 + 사다리꼴 속도 프로파일
+   *    payload>1 이면 "항상 가득 싣는다"는 가정의 상한 모델
    * ======================================================= */
   function cycleModel(sim) {
     const g = sim.graph, p = sim.params, L = sim.layout;
@@ -38,7 +39,8 @@
     const emptyFactor = p.dispatch_algo === 'hungarian' ? 0.66 : p.dispatch_algo === 'nearest' ? 0.72 : 0.88;
     const emptyM = (emptySum / pairs) * emptyFactor;
     const tTravel = tLoaded / pairs + (tEmpty / pairs) * emptyFactor;
-    const tDock = p.t_pick + p.t_drop;
+    // 적재·하역 시간은 수량에 비례
+    const tDock = (p.t_pick + p.t_drop) * p.payload;
 
     // 충전 오버헤드: 에너지 수지로 산출
     const wMove = p.p_move + p.p_load_add * 0.5;
@@ -64,7 +66,7 @@
     let laneM = 0;
     L.edges.forEach((e) => {
       const a = L.node(e.a), b = L.node(e.b);
-      if (a && b) laneM += g.pxToM(Math.hypot(a.x - b.x, a.y - b.y)) * (e.lanes || 1) * (e.dir === 'both' ? 1 : 1);
+      if (a && b) laneM += g.pxToM(Math.hypot(a.x - b.x, a.y - b.y)) * (e.lanes || 1);
     });
     if (laneM <= 0) return 1;
     const vehicleFootprint = p.safety_gap + 1.2;    // 차량 1대 점유 길이(m)
@@ -111,12 +113,13 @@
       let cycle = travel + cm.tDock + cm.tCharge;
 
       // 포트 대기: 반복 수렴 (도착률 ↔ 대기시간 상호의존)
+      // 포트 도착은 "운행" 단위(= 화물수/payload), 서비스시간은 payload 배
       let uph = (n * 3600 / cycle) * oee * avail * p.payload;
       let wait = 0;
       for (let it = 0; it < 12; it++) {
         const perPick = uph / picks, perDrop = uph / drops;
-        const wPick = portQueueWait(perPick, p.t_pick, p.port_cap);
-        const wDrop = portQueueWait(perDrop, p.t_drop, p.port_cap);
+        const wPick = portQueueWait(perPick / p.payload, p.t_pick * p.payload, p.port_cap);
+        const wDrop = portQueueWait(perDrop / p.payload, p.t_drop * p.payload, p.port_cap);
         wait = Math.min(600, wPick + wDrop);
         const c2 = travel + cm.tDock + cm.tCharge + wait;
         const u2 = (n * 3600 / c2) * oee * avail * p.payload;
@@ -136,7 +139,7 @@
   }
 
   /* =======================================================
-   * 5) 목표 UPH 달성 소요 대수 역산 (곡선 기반 이분 탐색)
+   * 5) 목표 UPH 달성 소요 대수 역산 (곡선 위 최초 충족점)
    * ======================================================= */
   function requiredFleet(sim, targetUPH, maxFleet = 60) {
     const { curve, model, limits } = throughputCurve(sim, maxFleet);
@@ -166,7 +169,8 @@
     }
     if (conn.broken.length) {
       items.push({ level: 'error', title: 'From-To 경로 단절',
-        msg: `도달 불가 구간 ${conn.broken.length}쌍. 일방통행 방향이 반대이거나 통로가 끊겼습니다.` });
+        msg: `도달 불가 구간 ${conn.broken.length}쌍. 일방통행 방향이 반대이거나 통로가 끊겼습니다.` +
+          (p.bidirectional === false ? ' <b>양방향 통행 허용이 꺼져 있어</b> 모든 통로가 일방통행입니다 — 통로를 클릭해 방향을 지정하세요.' : '') });
     }
 
     if (demand > limits.pick) {
@@ -184,7 +188,7 @@
     const cf = congestionFactor(sim, p.fleet);
     if (cf < 0.6) {
       items.push({ level: 'warn', title: '통로 혼잡 심각',
-        msg: `현재 ${p.fleet}대 투입 시 유효속도가 설계값의 <b>${Math.round(cf * 100)}%</b>로 저하됩니다. 복선 통로(lanes) 또는 일방통행 루프 전환을 검토하세요.` });
+        msg: `현재 ${p.fleet}대 투입 시 유효속도가 설계값의 <b>${Math.round(cf * 100)}%</b>로 저하됩니다. 통로를 클릭해 <b>차선 수</b>를 늘리거나 일방통행 루프 전환을 검토하세요.` });
     }
 
     if (k.blockShare > 12) {
@@ -248,11 +252,12 @@
 
   /* =======================================================
    * 7) 경제성 분석 (ROI / 손익분기)
+   *    curveIn 을 넘기면 처리량 곡선을 다시 계산하지 않는다
    * ======================================================= */
-  function economics(sim, fleetOverride) {
+  function economics(sim, fleetOverride, curveIn) {
     const p = sim.params;
     const fleet = fleetOverride || p.fleet;
-    const { curve } = throughputCurve(sim, Math.max(fleet, p.fleet) + 2);
+    const curve = curveIn || throughputCurve(sim, Math.max(fleet, p.fleet) + 2).curve;
     const pt = curve.find((c) => c.n === fleet) || curve[curve.length - 1];
     const uph = pt ? pt.uph : 0;
     const annualTasks = uph * p.shift_hours * 300;        // 연 300일 가동
@@ -305,19 +310,21 @@
   }
 
   /* =======================================================
-   * 9) 몬테카를로: 시드 반복 고속 시뮬레이션 (headless)
+   * 9) 몬테카를로: 시드 반복 고속 시뮬레이션 (headless, async)
+   *    반복마다 화면 갱신을 양보해 진행률이 실제로 표시된다
    * ======================================================= */
-  function monteCarlo(sim, opts, onProgress) {
+  async function monteCarlo(sim, opts, onProgress) {
     const runs = clamp(opts.runs || 8, 1, 40);
     const horizon = clamp(opts.horizonMin || 60, 5, 480) * 60;  // 초
     const dt = opts.dt || 0.4;
     const warmup = Math.min(horizon * 0.25, 600);
     const results = [];
+    const layoutJson = JSON.stringify(sim.layout.toJSON());
 
     for (let r = 0; r < runs; r++) {
       const params = { ...sim.params, seed: (sim.params.seed + r * 7919) >>> 0 };
       const layout = new AMR.model.Layout();
-      layout.fromJSON(JSON.parse(JSON.stringify(sim.layout.toJSON())));
+      layout.fromJSON(JSON.parse(layoutJson));
       const s = new AMR.Simulation(layout, params);
       let t = 0, warmDone = false;
       while (t < horizon) {
@@ -328,8 +335,12 @@
           s.metrics.completed = 0;
           s.metrics.blockedTime = 0;
           s.metrics.portWaitEvents = 0;
-          s.cycleSamples.clear(); s.queueSamples.clear();
+          s.cycleSamples.clear(); s.queueSamples.clear(); s.travelSamples.clear();
           s.robots.forEach((rb) => { rb.tBusy = 0; rb.tIdle = 0; rb.tBlocked = 0; rb.distM = 0; rb.loadedM = 0; rb.energyWh = 0; });
+          // 시계를 0으로 되돌리므로 진행 중 작업의 시각도 함께 이동 (음수 사이클 방지)
+          const off = s.t;
+          s.jobs.forEach((j) => { j.tCreated -= off; if (j.tAssigned) j.tAssigned -= off; });
+          s.robots.forEach((rb) => { rb.tripStart -= off; });
           s.t = 0;
           warmDone = true;
         }
@@ -337,10 +348,12 @@
       const k = s.kpi();
       results.push(k);
       if (onProgress) onProgress(r + 1, runs, k);
+      await new Promise((res) => setTimeout(res, 16));   // 화면 갱신 양보
     }
 
     const agg = (f) => {
       const arr = results.map(f).filter((v) => isFinite(v));
+      if (!arr.length) return { mean: 0, std: 0, min: 0, max: 0, ci: 0, p: [] };
       return { mean: stat.mean(arr), std: stat.std(arr), min: Math.min(...arr), max: Math.max(...arr), ci: stat.ci95(arr), p: arr };
     };
     return {
@@ -359,16 +372,17 @@
 
   /* =======================================================
    * 10) 시나리오 비교 (A/B/C)
+   *     현재 레이아웃 위에서 paramPatch 를 적용해 평가
    * ======================================================= */
   function evaluateScenario(sim, paramPatch) {
     const backup = { ...sim.params };
-    Object.assign(sim.params, paramPatch);
-    sim.graph.invalidateCache();
+    Object.assign(sim.params, paramPatch || {});
+    sim.graph.rebuild();   // bidirectional 등 그래프에 영향을 주는 값 반영
     const demand = sim.demandUPH();
     const req = requiredFleet(sim, demand);
     const { curve, limits } = throughputCurve(sim, Math.max(sim.params.fleet, 24));
     const pt = curve.find((c) => c.n === Math.round(sim.params.fleet)) || curve[0];
-    const eco = economics(sim);
+    const eco = economics(sim, null, curve);
     const cm = cycleModel(sim);
     const result = {
       demand,
@@ -383,7 +397,7 @@
       capex: eco.capex, payback: eco.paybackY, costPerTask: eco.costPerTask
     };
     Object.assign(sim.params, backup);
-    sim.graph.invalidateCache();
+    sim.graph.rebuild();
     return result;
   }
 

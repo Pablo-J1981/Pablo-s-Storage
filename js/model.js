@@ -19,8 +19,8 @@
     { key: 'payload',      group: 'vehicle', label: '1회 적재 수량(Payload)', unit: 'ea',   min: 1,   max: 8,    step: 1,    def: 1,   dec: 0 },
 
     // --- 하역 / 포트 ---
-    { key: 't_pick',       group: 'port',    label: '피킹 도킹+적재 시간',   unit: 's',    min: 2,   max: 180,  step: 1,    def: 14,  dec: 0 },
-    { key: 't_drop',       group: 'port',    label: '드롭 도킹+하역 시간',   unit: 's',    min: 2,   max: 180,  step: 1,    def: 12,  dec: 0 },
+    { key: 't_pick',       group: 'port',    label: '피킹 도킹+적재 시간 (1개당)', unit: 's', min: 2, max: 180,  step: 1,    def: 14,  dec: 0 },
+    { key: 't_drop',       group: 'port',    label: '드롭 도킹+하역 시간 (1개당)', unit: 's', min: 2, max: 180,  step: 1,    def: 12,  dec: 0 },
     { key: 'cv_service',   group: 'port',    label: '하역시간 변동계수(CV)', unit: '',     min: 0,   max: 0.8,  step: 0.05, def: 0.2, dec: 2 },
     { key: 'port_cap',     group: 'port',    label: '포트 동시 수용 대수',   unit: '대',   min: 1,   max: 4,    step: 1,    def: 1,   dec: 0 },
 
@@ -65,7 +65,7 @@
     p.release_mode = 'total';          // 'total' | 'per_station'
     p.auto_release = true;
     p.charge_policy = 'threshold';     // 'threshold' | 'opportunity'
-    p.bidirectional = true;            // 간선 양방향 허용
+    p.bidirectional = true;            // false 면 양방향 통로를 a→b 일방통행으로 취급
     p.failures = false;                // 고장 모델
     p.seed = 20260101;
     return p;
@@ -99,8 +99,28 @@
       this.counters = { P: 0, D: 0, C: 0, K: 0, N: 0 };
       this.name = '빈 레이아웃';
     }
-    node(id) { return this.nodes.find((n) => n.id === id) || null; }
-    byType(t) { return this.nodes.filter((n) => n.type === t); }
+
+    /* --- 조회 인덱스 (배열이 바뀌면 자동 재생성) --- */
+    _reindex() {
+      if (this._src === this.nodes && this._len === this.nodes.length) return;
+      this._idx = new Map(); this._types = {};
+      this.nodes.forEach((n) => {
+        this._idx.set(n.id, n);
+        (this._types[n.type] = this._types[n.type] || []).push(n);
+      });
+      this._src = this.nodes; this._len = this.nodes.length;
+    }
+    node(id) { this._reindex(); return this._idx.get(id) || null; }
+    byType(t) { this._reindex(); return this._types[t] || []; }
+    edgeBetween(a, b) {
+      if (this._eSrc !== this.edges || this._eLen !== this.edges.length) {
+        this._eIdx = new Map(this.edges.map((e) => [this.edgeKey(e.a, e.b), e]));
+        this._eSrc = this.edges; this._eLen = this.edges.length;
+      }
+      return this._eIdx.get(this.edgeKey(a, b)) || null;
+    }
+    hasEdge(a, b) { return !!this.edgeBetween(a, b); }
+
     nextId(type) {
       const pfx = { pick: 'P', drop: 'D', charge: 'C', park: 'K', waypoint: 'N' }[type];
       this.counters[pfx] = (this.counters[pfx] || 0) + 1;
@@ -127,7 +147,6 @@
       this.nodes = this.nodes.filter((n) => n.id !== id);
       this.edges = this.edges.filter((e) => e.a !== id && e.b !== id);
     }
-    hasEdge(a, b) { return this.edges.some((e) => (e.a === a && e.b === b) || (e.a === b && e.b === a)); }
     addEdge(a, b, dir = 'both') {
       if (a === b || this.hasEdge(a, b)) return null;
       const e = { a, b, dir, lanes: 1, speedFactor: 1, flow: 0, load: 0 };
@@ -149,7 +168,7 @@
           ? { a: e[0], b: e[1], dir: 'both', lanes: 1, speedFactor: 1, flow: 0, load: 0 }
           : { dir: 'both', lanes: 1, speedFactor: 1, flow: 0, load: 0, ...e }
       );
-      this.counters = o.counters || { P: 0, D: 0, C: 0, K: 0, N: 0 };
+      this.counters = { P: 0, D: 0, C: 0, K: 0, N: 0, ...(o.counters || {}) };
       ['pick', 'drop', 'charge', 'park', 'waypoint'].forEach((t) => {
         const pfx = { pick: 'P', drop: 'D', charge: 'C', park: 'K', waypoint: 'N' }[t];
         const max = this.byType(t).reduce((m, n) => {

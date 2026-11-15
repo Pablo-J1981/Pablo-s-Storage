@@ -12,6 +12,8 @@
   const $ = (s, r) => (r || document).querySelector(s);
   const $$ = (s, r) => Array.from((r || document).querySelectorAll(s));
   const STORE_KEY = 'amr_pro_state_v1';
+  const SNAP = 20;                                   // 격자 스냅 간격(px)
+  const NODE_TOOLS = ['pick', 'drop', 'charge', 'park', 'waypoint'];
 
   /* ================= State ================= */
   const app = {
@@ -20,12 +22,34 @@
     sim: null, rend: null,
     running: true, speed: 4, tool: 'select',
     lastFrame: 0, uiTick: 0, slowTick: 0,
-    drag: null, panning: false, panStart: null,
+    drag: null, dragFrom: null, panning: false, panStart: null,
+    snap: true,
     snapshots: {},
     sweepRows: null, sweepSpec: null,
-    mc: null,
+    mc: null, mcRunning: false,
     activeRightPane: 'r-overview'
   };
+
+  /* ================= 헬퍼 ================= */
+  const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g,
+    (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+  const snapPt = (wp, e) => (app.snap && !(e && e.altKey))
+    ? { x: Math.round(wp.x / SNAP) * SNAP, y: Math.round(wp.y / SNAP) * SNAP }
+    : { x: wp.x, y: wp.y };
+
+  const cursorFor = (t) => (t === 'pan' ? 'grab' : t === 'select' ? 'default' : 'crosshair');
+
+  /** 저장용 레이아웃 (실행 중 상태 제외) */
+  function layoutData() {
+    const L = app.layout;
+    return {
+      name: L.name,
+      nodes: L.nodes.map((n) => ({ id: n.id, type: n.type, x: n.x, y: n.y, name: n.name, priority: n.priority })),
+      edges: L.edges.map((e) => ({ a: e.a, b: e.b, dir: e.dir, lanes: e.lanes || 1, speedFactor: e.speedFactor || 1 })),
+      counters: { ...L.counters }
+    };
+  }
 
   /* ================= Toast ================= */
   function toast(msg, type) {
@@ -39,6 +63,51 @@
       el.style.opacity = '0'; el.style.transform = 'translateY(10px)';
       setTimeout(() => el.remove(), 320);
     }, type === 'err' ? 4200 : 2600);
+  }
+
+  /* ================= Undo / Redo (맵 편집) ================= */
+  const hist = { undo: [], redo: [] };
+
+  function snapshotLayout() { return JSON.stringify(layoutData()); }
+
+  function updateHistoryButtons() {
+    const u = $('#btnUndo'), r = $('#btnRedo');
+    if (u) u.style.opacity = hist.undo.length ? '1' : '.4';
+    if (r) r.style.opacity = hist.redo.length ? '1' : '.4';
+  }
+
+  /** 맵을 바꾸기 직전에 호출 */
+  function pushHistory(snap) {
+    hist.undo.push(snap || snapshotLayout());
+    if (hist.undo.length > 50) hist.undo.shift();
+    hist.redo.length = 0;
+    updateHistoryButtons();
+  }
+
+  function restoreLayout(json) {
+    app.layout.fromJSON(JSON.parse(json));
+    app.rend.edgeStart = null; app.drag = null; app.dragFrom = null;
+    closeInspector();
+    app.sim.graph.rebuild();
+    app.sim.reset();
+    refreshStations();
+    refreshLive();
+    refreshAnalytics();
+    updateHistoryButtons();
+  }
+
+  function undo() {
+    if (!hist.undo.length) { toast('되돌릴 작업이 없습니다.', 'warn'); return; }
+    hist.redo.push(snapshotLayout());
+    restoreLayout(hist.undo.pop());
+    toast('↩ 실행 취소');
+  }
+
+  function redo() {
+    if (!hist.redo.length) { toast('다시 실행할 작업이 없습니다.', 'warn'); return; }
+    hist.undo.push(snapshotLayout());
+    restoreLayout(hist.redo.pop());
+    toast('↪ 다시 실행');
   }
 
   /* ================= Param UI 생성 ================= */
@@ -97,6 +166,7 @@
 
     app.sim = new AMR.Simulation(app.layout, app.params);
     app.rend = new AMR.Renderer($('#simCanvas'), app.sim);
+    app.rend.resize();
 
     const restored = loadState();
     if (!restored) {
@@ -110,6 +180,8 @@
     app.rend.fitToContent();
     refreshStations();
     refreshAnalytics();
+    renderScenarios();
+    updateHistoryButtons();
     requestAnimationFrame(loop);
     setInterval(saveState, 12000);
   }
@@ -211,7 +283,7 @@
 
     const pane = app.activeRightPane;
     if (pane === 'r-fleet') renderFleetTable();
-    if (pane === 'r-overview') { renderJobChipsOnly(); renderPortTable(); }
+    if (pane === 'r-overview') renderPortTable();
     renderJobTable();
   }
 
@@ -251,7 +323,7 @@
       : `포트/통로 물리 한계로 달성 불가 — 레이아웃 개선 필요`;
 
     $('#kpiCycle').textContent = k.avgCycle > 0 ? fmt.n(k.avgCycle, 0) + 's' : (curPt ? fmt.n(curPt.cycle, 0) + 's' : '—');
-    $('#kpiCycleSub').textContent = k.avgCycle > 0 ? `실측 ${sim.cycleSamples.length}건` : '해석 모델 추정';
+    $('#kpiCycleSub').textContent = k.avgCycle > 0 ? `실측 ${sim.cycleSamples.length}회 운행` : '해석 모델 추정';
     $('#kpiP90').textContent = k.p90Cycle > 0 ? fmt.n(k.p90Cycle, 0) + 's' : '—';
     $('#kpiQueue').textContent = fmt.pct(k.queueShare, 1);
     $('#kpiBlock').textContent = fmt.pct(k.blockShare, 1);
@@ -278,27 +350,31 @@
         <div class="row between"><span>동시 충전 수요</span><b>${Math.ceil(p.fleet * chargeDuty * 1.25)} 대 / 슬롯 ${sim.layout.byType('charge').length * p.port_cap}</b></div>
         <div class="row between"><span>실측 평균 SoC</span><b>${fmt.pct(k.avgSoc, 0)}</b></div>
         <div class="row between"><span>건당 에너지</span><b>${k.energyPerTask > 0 ? fmt.n(k.energyPerTask, 1) + ' Wh' : '—'}</b></div>`;
+    } else {
+      $('#energyDiag').textContent = '피킹↔드롭 경로가 연결되면 계산됩니다.';
     }
 
     /* --- 비용 요약 --- */
-    const eco = A.economics(sim);
+    const eco = A.economics(sim, null, curveData.curve);
     $('#costQuick').innerHTML = `
       <div class="row between"><span>CAPEX (${p.fleet}대)</span><b>${fmt.int(eco.capex)} 만원</b></div>
       <div class="row between"><span>연간 순절감</span><b style="color:${eco.netSaveY > 0 ? 'var(--ok)' : 'var(--err)'}">${fmt.int(eco.netSaveY)} 만원</b></div>
       <div class="row between"><span>회수기간</span><b>${isFinite(eco.paybackY) ? fmt.n(eco.paybackY, 2) + ' 년' : '회수 불가'}</b></div>`;
 
-    renderMatrix();
+    /* --- 보이는 탭만 갱신 --- */
+    const pane = app.activeRightPane;
+    const studio = $('#studioModal').classList.contains('open');
+    if (pane === 'r-matrix' || studio) renderMatrix();
     renderCurve(curveData, demand, reqN);
-    renderEco();
-    renderPortTable();
-    renderFleetTable();
-    renderScenarios();
+    if (pane === 'r-eco') renderEco();
+    if (pane === 'r-overview') renderPortTable();
+    if (pane === 'r-fleet' || studio) renderFleetTable();
 
-    if (app.activeRightPane === 'r-overview') {
+    if (pane === 'r-overview') {
       C.curveChart('chartMini', curveData.curve, demand, Math.round(p.fleet), reqN);
       C.timeChart('chartTime', sim);
     }
-    if (app.activeRightPane === 'r-fleet') C.stateChart('chartState', sim);
+    if (pane === 'r-fleet') C.stateChart('chartState', sim);
   }
 
   /* ================= 거리 매트릭스 ================= */
@@ -326,37 +402,31 @@
     $('#mxDec').textContent = p.decel + ' m/s²';
     $('#mxTurn').textContent = p.turn_speed + ' °/s';
 
-    const body = rows.map((r) => {
-      const tF = r.ok ? sim.graph.pathTime(r.path, p) : 0;
-      const cycle = r.ok ? tF + sim.graph.pathTime(sim.graph.findPath(r.to.id, r.from.id).path, p) + p.t_pick + p.t_drop : 0;
-      return `<tr>
-        <td class="strong" style="color:var(--ok)">${r.from.name}</td>
-        <td class="strong" style="color:var(--accent)">${r.to.name}</td>
-        <td class="num strong">${r.ok ? fmt.n(r.distM, 1) + 'm' : '—'}</td>
-        <td class="num">${isFinite(r.backM) ? fmt.n(r.backM, 1) + 'm' : '—'}</td>
-        <td class="num">${r.ok ? fmt.n(tF, 1) + 's' : '—'}</td>
-        <td class="num">${r.ok ? fmt.n(cycle, 1) + 's' : '—'}</td>
-        <td class="num">${fmt.n(r.turns, 0)}°</td>
-        <td>${r.ok ? '<span class="badge green">연결</span>' : '<span class="badge red">단절</span>'}</td>
-      </tr>`;
-    }).join('');
-    $('#matrixTable').innerHTML = body || '<tr><td colspan="8" class="empty-row">피킹/드롭 스테이션을 배치하세요</td></tr>';
+    // 행별 시간 계산은 한 번만
+    rows.forEach((r) => {
+      r.tF = r.ok ? sim.graph.pathTime(r.path, p) : 0;
+      r.cycle = r.ok
+        ? r.tF + sim.graph.pathTime(sim.graph.findPath(r.to.id, r.from.id).path, p) + p.t_pick + p.t_drop
+        : 0;
+    });
 
-    $('#studioMatrix').innerHTML = rows.map((r) => {
-      const tF = r.ok ? sim.graph.pathTime(r.path, p) : 0;
-      const cycle = r.ok ? tF + sim.graph.pathTime(sim.graph.findPath(r.to.id, r.from.id).path, p) + p.t_pick + p.t_drop : 0;
-      return `<tr>
-        <td class="strong" style="color:var(--ok)">${r.from.name}</td>
-        <td class="strong" style="color:var(--accent)">${r.to.name}</td>
-        <td class="num strong">${r.ok ? fmt.n(r.distM, 1) + 'm' : '—'}</td>
+    const cells = (r) => `
+        <td class="strong" style="color:var(--ok)">${esc(r.from.name)}</td>
+        <td class="strong" style="color:var(--accent)">${esc(r.to.name)}</td>
+        <td class="num strong">${isFinite(r.distM) ? fmt.n(r.distM, 1) + 'm' : '—'}</td>
         <td class="num">${isFinite(r.backM) ? fmt.n(r.backM, 1) + 'm' : '—'}</td>
-        <td class="num">${r.ok ? fmt.n(tF, 1) + 's' : '—'}</td>
-        <td class="num">${r.ok ? fmt.n(cycle, 1) + 's' : '—'}</td>
-        <td class="num">${fmt.n(r.turns, 0)}°</td>
+        <td class="num">${r.ok ? fmt.n(r.tF, 1) + 's' : '—'}</td>
+        <td class="num">${r.ok ? fmt.n(r.cycle, 1) + 's' : '—'}</td>
+        <td class="num">${fmt.n(r.turns, 0)}°</td>`;
+    const status = (r) => (r.ok ? '<span class="badge green">연결</span>' : '<span class="badge red">단절</span>');
+
+    $('#matrixTable').innerHTML = rows.map((r) => `<tr>${cells(r)}<td>${status(r)}</td></tr>`).join('')
+      || '<tr><td colspan="8" class="empty-row">피킹/드롭 스테이션을 배치하세요</td></tr>';
+
+    $('#studioMatrix').innerHTML = rows.map((r) => `<tr>${cells(r)}
         <td class="tiny muted">${r.ok ? r.path.join(' → ') : '경로 없음'}</td>
-        <td>${r.ok ? '<span class="badge green">연결</span>' : '<span class="badge red">단절</span>'}</td>
-      </tr>`;
-    }).join('') || '<tr><td colspan="9" class="empty-row">데이터 없음</td></tr>';
+        <td>${status(r)}</td></tr>`).join('')
+      || '<tr><td colspan="9" class="empty-row">데이터 없음</td></tr>';
 
     app._matrixRows = rows;
   }
@@ -367,7 +437,7 @@
     const p = app.params;
     const hard = Math.min(limits.pick, limits.drop);
 
-    const rows = curve.map((c) => {
+    $('#curveTable').innerHTML = curve.map((c) => {
       const cur = c.n === Math.round(p.fleet);
       const bn = c.bottleneck;
       const badge = bn === 'AMR 대수' ? 'blue' : bn.includes('포트') ? 'amber' : bn.includes('혼잡') ? 'red' : 'gray';
@@ -380,7 +450,6 @@
         <td><span class="badge ${badge}">${bn}</span></td>
       </tr>`;
     }).join('');
-    $('#curveTable').innerHTML = rows;
 
     $('#studioCurve').innerHTML = curve.map((c) => {
       const cur = c.n === Math.round(p.fleet);
@@ -391,21 +460,22 @@
         <td class="num">${fmt.n(c.wait, 1)}s</td>
         <td class="num">${fmt.pct(c.factor * 100, 0)}</td>
         <td>${c.bottleneck}</td>
-        <td class="num">${fmt.pct((c.uph / hard) * 100, 0)}</td>
+        <td class="num">${hard > 0 ? fmt.pct((c.uph / hard) * 100, 0) : '—'}</td>
       </tr>`;
     }).join('');
 
     // 한계 효용 분석
     let kneeN = null;
-    for (let i = 1; i < curve.length; i++) {
+    const firstGain = curve[1] ? curve[1].uph - curve[0].uph : 0;
+    for (let i = 1; i < curve.length && !kneeN; i++) {
       const gain = curve[i].uph - curve[i - 1].uph;
-      const firstGain = curve[1] ? curve[1].uph - curve[0].uph : 1;
-      if (firstGain > 0 && gain / firstGain < 0.35 && !kneeN) kneeN = curve[i].n;
+      if (firstGain > 0 && gain / firstGain < 0.35) kneeN = curve[i].n;
     }
     $('#curveInsight').innerHTML =
       `📌 <b>한계 효용 변곡점: ${kneeN ? kneeN + '대' : '미도달'}</b> — 이 지점을 넘으면 1대 추가당 처리량 증가가 초기 대비 35% 미만으로 떨어집니다. ` +
       `포트 물리 한계는 <b>${Math.round(hard)} UPH</b>(${limits.pick <= limits.drop ? '피킹' : '드롭'} 측)이며, ` +
-      `현재 수요 <b>${Math.round(demand)} UPH</b>는 한계의 <b>${fmt.pct((demand / hard) * 100, 0)}</b> 수준입니다.`;
+      `현재 수요 <b>${Math.round(demand)} UPH</b>는 한계의 <b>${hard > 0 ? fmt.pct((demand / hard) * 100, 0) : '—'}</b> 수준입니다.` +
+      (p.payload > 1 ? ` <br>※ Payload ${p.payload}개 기준 예측은 <b>항상 가득 싣는다</b>는 상한 가정입니다. 실측은 묶을 화물이 모자라면 이보다 낮습니다.` : '');
 
     if (app.activeRightPane === 'r-curve') C.curveChart('chartCurve', curve, demand, Math.round(p.fleet), reqN);
     if ($('#studioModal').classList.contains('open')) C.curveChart('chartCurveBig', curve, demand, Math.round(p.fleet), reqN);
@@ -417,7 +487,10 @@
   /* ================= 경제성 ================= */
   function renderEco() {
     const sim = app.sim, p = app.params;
-    const eco = A.economics(sim);
+    const maxN = Math.max(12, Math.round(p.fleet) + 6);
+    const { curve } = A.throughputCurve(sim, maxN + 2);   // 곡선은 한 번만 계산
+    const eco = A.economics(sim, null, curve);
+
     $('#ecoPayback').innerHTML = isFinite(eco.paybackY)
       ? `${fmt.n(eco.paybackY, 2)} <small>년</small>`
       : `— <small>회수 불가</small>`;
@@ -435,8 +508,7 @@
     $('#ecoLabor').textContent = eco.laborEquivalent + ' 명';
 
     const rows = [];
-    const maxN = Math.max(12, Math.round(p.fleet) + 6);
-    for (let n = 1; n <= maxN; n++) rows.push(A.economics(sim, n));
+    for (let n = 1; n <= maxN; n++) rows.push(A.economics(sim, n, curve));
     $('#ecoTable').innerHTML = rows.map((r) => `
       <tr class="${r.fleet === Math.round(p.fleet) ? 'hl' : ''}">
         <td class="strong">${r.fleet}대</td>
@@ -454,7 +526,7 @@
         `건당 <b>${fmt.int(Math.abs(eco.costPerTask - best.costPerTask))}원</b> 차이가 발생합니다.`}`
       : `💡 현재 가정에서는 투자 회수가 성립하지 않습니다. 처리량·인건비 입력값을 점검하세요.`;
 
-    if (app.activeRightPane === 'r-eco') C.ecoChart('chartEco', rows);
+    C.ecoChart('chartEco', rows);
   }
 
   /* ================= 테이블들 ================= */
@@ -464,7 +536,7 @@
     $('#portTable').innerHTML = ns.map((n) => {
       const t = n.type === 'pick' ? 'green' : n.type === 'drop' ? 'amber' : 'red';
       return `<tr>
-        <td><span class="badge ${t}">${M.NODE_TYPES[n.type].label}</span> <b>${n.name}</b></td>
+        <td><span class="badge ${t}">${M.NODE_TYPES[n.type].label}</span> <b>${esc(n.name)}</b></td>
         <td class="num" style="color:${n.buffer > 6 ? 'var(--err)' : 'inherit'}">${n.buffer}</td>
         <td class="num">${n.processed}</td>
         <td class="num">${n.occupants.length}/${app.params.port_cap}${n.queue ? ` <span style="color:var(--warn)">+${n.queue}</span>` : ''}</td>
@@ -484,7 +556,7 @@
       ${k.faulted ? `<span class="chip err">고장 <b>${k.faulted}</b></span>` : ''}
       <span class="chip">가동률 <b>${fmt.pct(k.util, 0)}</b></span>
       <span class="chip">평균 SoC <b>${fmt.pct(k.avgSoc, 0)}</b></span>
-      <span class="chip">총 주행 <b>${fmt.int(k.distanceM / 1000)}km</b></span>`;
+      <span class="chip">총 주행 <b>${fmt.n(k.distanceM / 1000, 1)}km</b></span>`;
 
     const socBar = (s) => {
       const col = s <= p.bat_min ? 'var(--err)' : s >= p.bat_max ? 'var(--ok)' : 'var(--warn)';
@@ -498,39 +570,41 @@
         <td class="nowrap">${socBar(r.soc)}</td>
         <td class="num">${fmt.pct(r.util, 0)}</td>
         <td class="num">${r.jobs}</td>
-        <td class="tiny muted">${r.task}</td>
+        <td class="tiny muted">${esc(r.task)}</td>
       </tr>`).join('') || '<tr><td colspan="6" class="empty-row">차량 없음</td></tr>';
 
-    $('#studioFleet').innerHTML = snaps.map((r) => `
-      <tr>
-        <td class="strong">${r.id}</td>
-        <td class="nowrap">${r.label}</td>
-        <td class="nowrap">${socBar(r.soc)}</td>
-        <td class="num">${fmt.pct(r.util, 1)}</td>
-        <td class="num" style="color:${r.blocked > 10 ? 'var(--err)' : 'inherit'}">${fmt.pct(r.blocked, 1)}</td>
-        <td class="num">${fmt.n(r.distM / 1000, 2)} km</td>
-        <td class="num">${fmt.n(r.energy, 0)} Wh</td>
-        <td class="num">${r.jobs}</td>
-        <td class="tiny muted">${r.task}</td>
-      </tr>`).join('');
-  }
-
-  function renderJobChipsOnly() {
-    const sim = app.sim;
-    const pend = sim.jobs.filter((j) => j.status === 'pending').length;
-    const act = sim.jobs.filter((j) => j.status !== 'done' && j.status !== 'pending').length;
-    const done = sim.metrics.completed;
-    $('#jobChips').innerHTML = `
-      <span class="chip">대기 <b>${pend}</b></span>
-      <span class="chip warn">진행 <b>${act}</b></span>
-      <span class="chip ok">완료 <b>${done}</b></span>
-      <span class="chip">누적발생 <b>${sim.metrics.released}</b></span>`;
+    if ($('#studioModal').classList.contains('open')) {
+      $('#studioFleet').innerHTML = snaps.map((r) => `
+        <tr>
+          <td class="strong">${r.id}</td>
+          <td class="nowrap">${r.label}</td>
+          <td class="nowrap">${socBar(r.soc)}</td>
+          <td class="num">${fmt.pct(r.util, 1)}</td>
+          <td class="num" style="color:${r.blocked > 10 ? 'var(--err)' : 'inherit'}">${fmt.pct(r.blocked, 1)}</td>
+          <td class="num">${fmt.n(r.distM / 1000, 2)} km</td>
+          <td class="num">${fmt.n(r.energy, 0)} Wh</td>
+          <td class="num">${r.jobs}</td>
+          <td class="tiny muted">${esc(r.task)}</td>
+        </tr>`).join('');
+    }
   }
 
   function renderJobTable() {
     const sim = app.sim;
-    renderJobChipsOnly();
-    const show = sim.jobs.filter((j) => j.status !== 'done').slice(-40).reverse();
+    let pend = 0, act = 0;
+    const open = [];
+    for (const j of sim.jobs) {
+      if (j.status === 'done') continue;
+      open.push(j);
+      if (j.status === 'pending') pend++; else act++;
+    }
+    $('#jobChips').innerHTML = `
+      <span class="chip">대기 <b>${pend}</b></span>
+      <span class="chip warn">진행 <b>${act}</b></span>
+      <span class="chip ok">완료 <b>${sim.metrics.completed}</b></span>
+      <span class="chip">누적발생 <b>${sim.metrics.released}</b></span>`;
+
+    const show = open.slice(-40).reverse();
     const badge = { pending: 'gray', assigned: 'blue', queue: 'amber', loading: 'green', moving: 'purple' };
     const label = { pending: '대기', assigned: '배차', queue: '포트대기', loading: '적재', moving: '이송' };
     $('#jobTable').innerHTML = show.map((j) => `
@@ -546,8 +620,10 @@
   function refreshStations() {
     const L = app.layout;
     const fill = (sel, nodes) => {
-      sel.innerHTML = nodes.map((n) => `<option value="${n.id}">${n.name}</option>`).join('')
+      const keep = sel.value;
+      sel.innerHTML = nodes.map((n) => `<option value="${n.id}">${esc(n.name)}</option>`).join('')
         || '<option value="">없음</option>';
+      if (keep && nodes.some((n) => n.id === keep)) sel.value = keep;
     };
     fill($('#selFrom'), L.byType('pick'));
     fill($('#selTo'), L.byType('drop'));
@@ -556,23 +632,25 @@
   /* ================= 시나리오 ================= */
   function renderScenarios() {
     const keys = ['A', 'B', 'C'];
-    const host = $('#scenarioGrid');
-    const results = {};
     keys.forEach((k) => {
-      const snap = app.snapshots[k];
-      if (snap) results[k] = A.evaluateScenario(app.sim, snap.params);
+      const s = app.snapshots[k];
+      // 구버전 저장분(결과 없음)은 현재 맵 기준으로 한 번만 평가
+      if (s && !s.result) s.result = A.evaluateScenario(app.sim, s.params);
     });
-    const valid = Object.values(results).filter((r) => r);
-    const bestUph = valid.length ? Math.max(...valid.map((r) => r.uph)) : 0;
+    const valid = keys.map((k) => app.snapshots[k]).filter(Boolean);
+    const bestUph = valid.length ? Math.max(...valid.map((s) => s.result.uph)) : 0;
 
-    host.innerHTML = keys.map((k) => {
-      const snap = app.snapshots[k], r = results[k];
-      if (!snap || !r) {
+    $('#scenarioGrid').innerHTML = keys.map((k) => {
+      const snap = app.snapshots[k];
+      if (!snap) {
         return `<div class="scenario"><h4>시나리오 ${k}</h4><div class="tiny muted">저장된 설정 없음</div></div>`;
       }
+      const r = snap.result;
       const best = r.uph >= bestUph - 0.5;
+      const pay = r.payback != null && isFinite(r.payback) ? fmt.n(r.payback, 2) + '년' : '—';
       return `<div class="scenario ${best ? 'best' : ''}">
         <h4>시나리오 ${k}${best ? ' <span class="badge green">최고</span>' : ''}</h4>
+        <div class="row"><span>맵</span><span>${snap.layout ? esc(snap.layout.name || '-') : '미포함'}</span></div>
         <div class="row"><span>AMR</span><span>${snap.params.fleet}대</span></div>
         <div class="row"><span>처리량</span><span>${Math.round(r.uph)} UPH</span></div>
         <div class="row"><span>수요</span><span>${Math.round(r.demand)} UPH</span></div>
@@ -581,7 +659,8 @@
         <div class="row"><span>소요대수</span><span>${r.reqFleet || '—'}</span></div>
         <div class="row"><span>제약</span><span>${r.bottleneck}</span></div>
         <div class="row"><span>건당원가</span><span>${fmt.int(r.costPerTask)}원</span></div>
-        <div class="row"><span>회수</span><span>${isFinite(r.payback) ? fmt.n(r.payback, 2) + '년' : '—'}</span></div>
+        <div class="row"><span>회수</span><span>${pay}</span></div>
+        <button class="btn xs" data-load-snap="${k}" style="width:100%;margin-top:6px">↩ 불러오기</button>
       </div>`;
     }).join('');
   }
@@ -600,7 +679,7 @@
         const pane = $('#' + t.dataset.pane, scope);
         if (pane) pane.classList.add('active');
         if (t.dataset.pane.startsWith('r-')) { app.activeRightPane = t.dataset.pane; refreshAnalytics(); }
-        if (t.dataset.pane === 's-curve' || t.dataset.pane === 's-time') setTimeout(refreshAnalytics, 50);
+        if (t.dataset.pane.startsWith('s-')) setTimeout(refreshAnalytics, 50);
         if (t.dataset.pane === 's-time') { C.timeChart('chartTimeBig', app.sim); C.portChart('chartPort', app.layout); }
       });
     });
@@ -623,18 +702,24 @@
       const key = $('#presetSelect').value;
       const preset = M.PRESETS[key];
       if (!preset) return;
+      pushHistory();
+      closeInspector();
       preset.build(app.layout);
       app.sim.graph.rebuild();
       app.sim.reset();
       app.rend.fitToContent();
       refreshStations();
+      refreshLive();
       refreshAnalytics();
-      toast(`🏭 <b>${preset.label}</b> 레이아웃 적용 — ${preset.desc}`, 'ok');
+      toast(`🏭 <b>${preset.label}</b> 레이아웃 적용 — ${preset.desc} (Ctrl+Z로 되돌리기)`, 'ok');
     });
 
     /* --- 저장/불러오기 --- */
     $('#btnSave').addEventListener('click', () => {
-      const data = { version: 2, params: app.params, layout: app.layout.toJSON(), theme: document.body.className };
+      const data = {
+        version: 3, params: app.params, layout: layoutData(),
+        theme: document.body.className, snapshots: app.snapshots
+      };
       downloadBlob(JSON.stringify(data, null, 2), `amr_pro_${new Date().toISOString().slice(0, 10)}.json`, 'application/json');
       toast('💾 설정 파일을 저장했습니다.', 'ok');
     });
@@ -645,31 +730,30 @@
       r.onload = () => {
         try {
           const d = JSON.parse(r.result);
-          applyState(d);
-          toast('📂 설정을 불러왔습니다.', 'ok');
+          const before = snapshotLayout();
+          if (applyState(d)) { pushHistory(before); toast('📂 설정을 불러왔습니다.', 'ok'); }
+          else toast('⚠️ 레이아웃 정보가 없는 파일입니다.', 'err');
         } catch (err) { toast('⚠️ JSON 파싱 실패: ' + err.message, 'err'); }
       };
       r.readAsText(f);
       e.target.value = '';
     });
 
-    /* --- 리포트 --- */
+    /* --- 리포트 / 모달 --- */
     $('#btnReport').addEventListener('click', exportReport);
     $('#btnHelp').addEventListener('click', () => $('#helpModal').classList.add('open'));
     $$('[data-close-modal]').forEach((b) => b.addEventListener('click', (e) => e.target.closest('.modal').classList.remove('open')));
     $$('.modal').forEach((m) => m.addEventListener('click', (e) => { if (e.target === m) m.classList.remove('open'); }));
     $('#btnStudio').addEventListener('click', () => {
       $('#studioModal').classList.add('open');
-      setTimeout(() => { refreshAnalytics(); C.timeChart('chartTimeBig', app.sim); }, 60);
+      setTimeout(() => { refreshAnalytics(); C.timeChart('chartTimeBig', app.sim); C.portChart('chartPort', app.layout); }, 60);
     });
     $('#btnStudioCsv').addEventListener('click', exportAllCsv);
 
     /* --- 수요 --- */
     $('#chkAutoRelease').addEventListener('change', (e) => {
       app.params.auto_release = e.target.checked;
-      const t = $('#txtAutoRelease');
-      t.textContent = e.target.checked ? 'ON' : 'OFF';
-      t.style.color = e.target.checked ? 'var(--ok)' : 'var(--text-faint)';
+      syncAutoReleaseLabel();
       refreshAnalytics();
     });
     $('#selReleaseMode').addEventListener('change', (e) => {
@@ -691,8 +775,13 @@
       toast(`✅ ${f} → ${t} 작업 등록`, 'ok');
     });
     $('#btnClearJobs').addEventListener('click', () => {
+      const L = app.layout;
+      app.sim.jobs.forEach((j) => {
+        if (j.status !== 'pending') return;
+        const n = L.node(j.from);
+        if (n) n.buffer = Math.max(0, n.buffer - 1);
+      });
       app.sim.jobs = app.sim.jobs.filter((j) => j.status !== 'pending');
-      app.layout.byType('pick').forEach((n) => (n.buffer = 0));
       renderJobTable();
       toast('대기 작업을 비웠습니다.');
     });
@@ -702,13 +791,13 @@
       const r = new FileReader();
       r.onload = () => {
         let added = 0, skipped = 0;
-        r.result.split(/\r?\n/).forEach((line, i) => {
+        String(r.result).replace(/^\uFEFF/, '').split(/\r?\n/).forEach((line, i) => {
           if (!line.trim()) return;
           if (i === 0 && /from/i.test(line)) return;
-          const [a, b, qty] = line.split(',').map((s) => (s || '').trim());
+          const [a, b, qty] = line.split(',').map((s) => (s || '').trim().replace(/^"|"$/g, ''));
           const fn = app.layout.node(a), tn = app.layout.node(b);
-          if (fn && tn) {
-            const q = Math.max(1, parseInt(qty, 10) || 1);
+          if (fn && tn && fn.type === 'pick' && tn.type === 'drop') {
+            const q = clamp(parseInt(qty, 10) || 1, 1, 500);
             for (let n = 0; n < q; n++) { app.sim.createJob(fn, tn); added++; }
           } else skipped++;
         });
@@ -737,6 +826,13 @@
       app.params.bidirectional = e.target.checked;
       app.sim.graph.rebuild();
       refreshAnalytics();
+      if (app.rend.selectedEdge) showEdgeInspector(app.rend.selectedEdge);
+      const broken = app.sim.graph.connectivityReport().broken.length;
+      if (!e.target.checked) {
+        toast(broken
+          ? `➡ 모든 양방향 통로를 일방통행(A→B)으로 전환 — <b>경로 단절 ${broken}쌍</b>. 통로를 클릭해 방향을 지정하세요.`
+          : '➡ 모든 양방향 통로를 일방통행(A→B)으로 전환했습니다.', broken ? 'warn' : 'ok');
+      } else toast('↔ 양방향 통행을 허용합니다.', 'ok');
     });
     $('#selChargePolicy').addEventListener('change', (e) => { app.params.charge_policy = e.target.value; });
     $('#chkFailures').addEventListener('change', (e) => {
@@ -745,11 +841,14 @@
       refreshAnalytics();
     });
     $('#btnReseed').addEventListener('click', () => {
-      const v = parseInt($('#inpSeed').value, 10);
-      app.params.seed = isFinite(v) ? v : Date.now() % 1e8;
+      let v = parseInt($('#inpSeed').value, 10);
+      // 값을 바꾸지 않고 누르면 새 시드를 뽑는다
+      if (!isFinite(v) || v === app.params.seed) v = Math.floor(Math.random() * 1e8);
+      app.params.seed = v >>> 0;
       $('#inpSeed').value = app.params.seed;
-      app.sim.rng.reset(app.params.seed);
-      toast(`🎲 시드를 ${app.params.seed}로 설정했습니다.`, 'ok');
+      app.sim.reset();                        // 시드부터 다시 시작해야 재현성이 보장됨
+      refreshLive(); refreshAnalytics();
+      toast(`🎲 시드 ${app.params.seed} 적용 — 시뮬레이션을 처음부터 다시 시작합니다.`, 'ok');
     });
 
     /* --- 재생 제어 --- */
@@ -777,15 +876,23 @@
 
     /* --- 도구 --- */
     $$('[data-tool]').forEach((b) => b.addEventListener('click', () => setTool(b.dataset.tool)));
+    $('#btnUndo').addEventListener('click', undo);
+    $('#btnRedo').addEventListener('click', redo);
+    $('#btnSnap').addEventListener('click', (ev) => {
+      app.snap = !app.snap;
+      ev.currentTarget.classList.toggle('active', app.snap);
+    });
 
     $('#btnAutoLink').addEventListener('click', autoLink);
     $('#btnClearMap').addEventListener('click', () => {
-      if (!confirm('맵의 모든 노드와 통로를 삭제할까요?')) return;
+      if (!app.layout.nodes.length) return;
+      pushHistory();
+      closeInspector();
       app.layout.reset();
       app.sim.graph.rebuild();
       app.sim.reset();
-      refreshStations(); refreshAnalytics();
-      toast('🧹 맵을 초기화했습니다.');
+      refreshStations(); refreshLive(); refreshAnalytics();
+      toast('🧹 맵을 초기화했습니다. (Ctrl+Z로 되돌리기)');
     });
 
     /* --- 플릿 조정 --- */
@@ -810,34 +917,56 @@
     $('#btnSweep').addEventListener('click', runSweep);
     $('#btnMonteCarlo').addEventListener('click', runMonteCarlo);
     $$('[data-snap]').forEach((b) => b.addEventListener('click', () => {
-      app.snapshots[b.dataset.snap] = { params: { ...app.params } };
+      app.snapshots[b.dataset.snap] = {
+        params: { ...app.params },
+        layout: layoutData(),
+        result: A.evaluateScenario(app.sim, {})
+      };
       renderScenarios();
-      toast(`📌 시나리오 ${b.dataset.snap}에 현재 설정을 저장했습니다.`, 'ok');
+      saveState();
+      toast(`📌 시나리오 ${b.dataset.snap}에 현재 설정과 맵을 저장했습니다.`, 'ok');
     }));
-    $('#btnClearSnap').addEventListener('click', () => { app.snapshots = {}; renderScenarios(); });
+    $('#btnClearSnap').addEventListener('click', () => { app.snapshots = {}; renderScenarios(); saveState(); });
+    $('#scenarioGrid').addEventListener('click', (e) => {
+      const b = e.target.closest('[data-load-snap]');
+      const snap = b && app.snapshots[b.dataset.loadSnap];
+      if (!snap) return;
+      pushHistory();
+      applyState({ params: snap.params, layout: snap.layout || layoutData() });
+      toast(`↩ 시나리오 ${b.dataset.loadSnap}를 불러왔습니다.${snap.layout ? '' : ' (구버전 저장분이라 맵은 현재 것을 유지)'}`, 'ok');
+    });
 
     /* --- 인스펙터 --- */
     $('#inspClose').addEventListener('click', closeInspector);
-    $('#inspRename').addEventListener('click', () => {
-      const n = app.rend.selected; if (!n) return;
-      const v = prompt('스테이션 이름', n.name);
-      if (v) { n.name = v.slice(0, 24); refreshStations(); refreshAnalytics(); showInspector(n); }
-    });
-    $('#inspPriority').addEventListener('click', () => {
-      const n = app.rend.selected; if (!n) return;
-      const v = prompt('수요 가중치 (1=기본, 2=2배 빈도)', n.priority);
-      const f = parseFloat(v);
-      if (isFinite(f) && f > 0) { n.priority = clamp(f, 0.1, 10); showInspector(n); toast(`⚖ ${n.name} 가중치 ${n.priority}`); }
-    });
-    $('#inspDelete').addEventListener('click', () => {
-      const n = app.rend.selected; if (!n) return;
-      deleteNode(n);
-      closeInspector();
+    $('#inspDelete').addEventListener('click', deleteSelection);
+    $('#inspBody').addEventListener('change', (ev) => {
+      const key = ev.target.dataset.insp;
+      const n = app.rend.selected, e = app.rend.selectedEdge;
+      if (!key || (!n && !e)) return;
+      const v = ev.target.value;
+      pushHistory();
+      if (n) {
+        if (key === 'name') n.name = v.trim().slice(0, 24) || n.id;
+        if (key === 'priority') n.priority = clamp(parseFloat(v) || 1, 0.1, 10);
+        refreshStations(); refreshAnalytics(); showInspector(n);
+      } else {
+        if (key === 'dir') e.dir = v;
+        if (key === 'lanes') e.lanes = clamp(Math.round(parseFloat(v) || 1), 1, 4);
+        if (key === 'speedFactor') e.speedFactor = clamp(parseFloat(v) || 1, 0.2, 1);
+        afterLayoutChange(); showEdgeInspector(e);
+      }
     });
 
     bindCanvas();
     bindKeyboard();
     global.addEventListener('resize', () => { app.rend.resize(); });
+  }
+
+  function syncAutoReleaseLabel() {
+    const on = !!app.params.auto_release;
+    const t = $('#txtAutoRelease');
+    t.textContent = on ? 'ON' : 'OFF';
+    t.style.color = on ? 'var(--ok)' : 'var(--text-faint)';
   }
 
   function togglePlay() {
@@ -855,9 +984,10 @@
   function setTool(t) {
     app.tool = t;
     app.rend.edgeStart = null;
+    app.rend.ghost = null;
+    app.rend.hoverEdge = null;
     $$('[data-tool]').forEach((b) => b.classList.toggle('active', b.dataset.tool === t));
-    const cv = $('#simCanvas');
-    cv.style.cursor = t === 'pan' ? 'grab' : t === 'delete' ? 'crosshair' : t === 'select' ? 'default' : 'crosshair';
+    $('#simCanvas').style.cursor = cursorFor(t);
   }
 
   function toggleSide(side) {
@@ -883,6 +1013,10 @@
     }, { passive: false });
 
     cv.addEventListener('mousedown', (e) => {
+      // 인스펙터에서 입력 중이던 값을 먼저 확정
+      const ae = document.activeElement;
+      if (ae && ae.closest && ae.closest('#inspBody')) ae.blur();
+
       const r = cv.getBoundingClientRect();
       const sx = e.clientX - r.left, sy = e.clientY - r.top;
       const wp = app.rend.toWorld(sx, sy);
@@ -893,44 +1027,66 @@
         cv.style.cursor = 'grabbing';
         return;
       }
+      if (e.button !== 0) return;
 
       const hit = app.rend.nodeAt(wp);
 
       switch (app.tool) {
         case 'select':
-          if (hit) { app.drag = hit; app.rend.selected = hit; showInspector(hit); }
-          else { app.rend.selected = null; closeInspector(); }
+          if (hit) {
+            app.drag = hit;
+            app.dragFrom = { x: hit.x, y: hit.y, sx, sy, moved: false, snap: snapshotLayout() };
+            showInspector(hit);
+          } else {
+            const ed = app.rend.edgeAt(wp, 10);
+            if (ed) showEdgeInspector(ed); else closeInspector();
+          }
           break;
+
         case 'delete':
           if (hit) deleteNode(hit);
           else {
             const ed = app.rend.edgeAt(wp, 12);
-            if (ed) { app.layout.removeEdge(ed); afterLayoutChange(); toast('통로를 삭제했습니다.'); }
-          }
-          break;
-        case 'edge':
-          if (hit) {
-            if (!app.rend.edgeStart) { app.rend.edgeStart = hit; }
-            else if (app.rend.edgeStart.id !== hit.id) {
-              const dir = e.shiftKey ? 'ab' : 'both';
-              const ed = app.layout.addEdge(app.rend.edgeStart.id, hit.id, dir);
-              app.rend.edgeStart = null;
-              if (ed) { afterLayoutChange(); toast(dir === 'ab' ? '➡ 일방통행 통로 생성' : '🔗 양방향 통로 생성', 'ok'); }
-              else toast('이미 연결된 구간입니다.', 'warn');
+            if (ed) {
+              pushHistory();
+              if (app.rend.selectedEdge === ed) closeInspector();
+              app.layout.removeEdge(ed);
+              app.rend.hoverEdge = null;
+              afterLayoutChange();
+              toast('통로를 삭제했습니다.');
             }
           }
           break;
-        case 'pick': case 'drop': case 'charge': case 'park': case 'waypoint': {
-          const n = app.layout.addNode(app.tool, wp.x, wp.y);
-          // 가장 가까운 노드에 자동 연결
-          const others = app.layout.nodes.filter((x) => x !== n);
-          if (others.length) {
-            let best = others[0], bd = Infinity;
-            others.forEach((o) => { const d = Math.hypot(o.x - n.x, o.y - n.y); if (d < bd) { bd = d; best = o; } });
-            if (bd < 320) app.layout.addEdge(n.id, best.id);
+
+        case 'edge':
+          if (!hit) { app.rend.edgeStart = null; break; }            // 빈 곳 클릭 = 종료
+          if (!app.rend.edgeStart) { app.rend.edgeStart = hit; break; }
+          if (app.rend.edgeStart.id !== hit.id) {
+            const dir = e.shiftKey ? 'ab' : 'both';
+            if (!app.layout.hasEdge(app.rend.edgeStart.id, hit.id)) {
+              pushHistory();
+              app.layout.addEdge(app.rend.edgeStart.id, hit.id, dir);
+              afterLayoutChange();
+              toast(dir === 'ab' ? '➡ 일방통행 통로 생성' : '🔗 양방향 통로 생성', 'ok');
+            }
+            app.rend.edgeStart = hit;                                 // 연속 연결
           }
+          break;
+
+        case 'pick': case 'drop': case 'charge': case 'park': case 'waypoint': {
+          if (hit) { toast('이미 노드가 있는 위치입니다.', 'warn'); break; }
+          pushHistory();
+          const sp = snapPt(wp, e);
+          const n = app.layout.addNode(app.tool, sp.x, sp.y);
+          // 가장 가까운 노드에 자동 연결
+          let best = null, bd = Infinity;
+          app.layout.nodes.forEach((o) => {
+            if (o === n) return;
+            const d = Math.hypot(o.x - n.x, o.y - n.y);
+            if (d < bd) { bd = d; best = o; }
+          });
+          if (best && bd < 320) app.layout.addEdge(n.id, best.id);
           afterLayoutChange();
-          app.rend.selected = n;
           showInspector(n);
           toast(`${M.NODE_TYPES[app.tool].label} <b>${n.id}</b> 배치`, 'ok');
           break;
@@ -951,22 +1107,44 @@
       app.rend.mouseWorld = wp;
 
       if (app.drag && app.tool === 'select') {
-        app.drag.x = wp.x; app.drag.y = wp.y;
-        app.sim.graph.rebuild();
+        const f = app.dragFrom;
+        // 단순 클릭의 미세한 떨림으로 노드가 격자에 튀지 않도록 4px 이상 움직였을 때만 이동
+        if (!f.moved && Math.hypot(sx - f.sx, sy - f.sy) < 4) return;
+        f.moved = true;
+        const sp = snapPt(wp, e);
+        if (sp.x !== app.drag.x || sp.y !== app.drag.y) {
+          app.drag.x = sp.x; app.drag.y = sp.y;
+          app.sim.graph.rebuild();
+        }
         return;
       }
+
       app.rend.hover = app.rend.nodeAt(wp);
       app.rend.hoverEdge = (!app.rend.hover && app.tool === 'delete') ? app.rend.edgeAt(wp, 12) : null;
-      app.rend.ghost = ['pick', 'drop', 'charge', 'park', 'waypoint'].includes(app.tool)
-        ? { type: app.tool, x: wp.x, y: wp.y } : null;
+      app.rend.ghost = NODE_TOOLS.includes(app.tool) ? { type: app.tool, ...snapPt(wp, e) } : null;
+      if (app.tool === 'select') {
+        cv.style.cursor = (app.rend.hover || app.rend.edgeAt(wp, 10)) ? 'pointer' : 'default';
+      }
+    });
+
+    cv.addEventListener('mouseleave', () => {
+      app.rend.ghost = null; app.rend.hover = null; app.rend.hoverEdge = null;
     });
 
     global.addEventListener('mouseup', () => {
       if (app.panning) {
         app.panning = false;
-        $('#simCanvas').style.cursor = app.tool === 'pan' ? 'grab' : 'default';
+        $('#simCanvas').style.cursor = cursorFor(app.tool);
       }
-      if (app.drag) { app.drag = null; afterLayoutChange(); }
+      if (app.drag) {
+        const d = app.drag, f = app.dragFrom;
+        app.drag = null; app.dragFrom = null;
+        if (f && (d.x !== f.x || d.y !== f.y)) {
+          pushHistory(f.snap);
+          afterLayoutChange();
+          if (app.rend.selected === d) showInspector(d);
+        }
+      }
     });
 
     // 터치
@@ -1008,23 +1186,41 @@
   }
 
   function deleteNode(n) {
+    pushHistory();
+    const safe = app.layout.nodes.find((x) => x !== n);
     app.sim.robots.forEach((r) => {
-      if (r.atNode === n.id || r.nextNode === n.id || (r.job && (r.job.from === n.id || r.job.to === n.id))) {
-        r.abortJob();
-        const safe = app.layout.nodes.find((x) => x !== n);
-        if (safe) { r.atNode = safe.id; r.x = safe.x; r.y = safe.y; }
-      }
+      const touches = r.atNode === n.id || r.nextNode === n.id || r.path.includes(n.id)
+        || (r.job && (r.job.from === n.id || r.job.to === n.id));
+      if (!touches) return;
+      r.abortJob();
+      if (r.atNode === n.id && safe) { r.atNode = safe.id; r.x = safe.x; r.y = safe.y; }
     });
-    app.sim.jobs = app.sim.jobs.filter((j) => j.from !== n.id && j.to !== n.id);
+    app.sim.jobs = app.sim.jobs.filter((j) => j.status === 'done' || (j.from !== n.id && j.to !== n.id));
     app.layout.removeNode(n.id);
-    if (app.rend.selected === n) { app.rend.selected = null; closeInspector(); }
+    if (app.rend.edgeStart === n) app.rend.edgeStart = null;
+    if (app.rend.hover === n) app.rend.hover = null;
+    if (app.rend.selected === n || app.rend.selectedEdge) closeInspector();
     afterLayoutChange();
     toast(`🗑 <b>${n.id}</b> 삭제`);
+  }
+
+  /** 인스펙터에 열려 있는 노드 또는 통로 삭제 */
+  function deleteSelection() {
+    const n = app.rend.selected, e = app.rend.selectedEdge;
+    if (n) deleteNode(n);
+    else if (e) {
+      pushHistory();
+      app.layout.removeEdge(e);
+      afterLayoutChange();
+      toast('통로를 삭제했습니다.');
+    }
+    closeInspector();
   }
 
   function autoLink() {
     const L = app.layout, ns = L.nodes;
     if (ns.length < 2) { toast('노드가 부족합니다.', 'warn'); return; }
+    const before = snapshotLayout();
     let added = 0;
     const R = 230;
     ns.forEach((a, i) => {
@@ -1043,46 +1239,83 @@
       ns.forEach((b) => { if (b === a) return; const d = Math.hypot(a.x - b.x, a.y - b.y); if (d < bd) { bd = d; best = b; } });
       if (best && L.addEdge(a.id, best.id)) added++;
     });
+    if (added) pushHistory(before);
     afterLayoutChange();
     toast(added ? `🪄 통로 ${added}개 자동 생성` : '추가할 통로가 없습니다.', added ? 'ok' : 'warn');
   }
 
+  /* ================= 인스펙터 ================= */
   function showInspector(n) {
     const sim = app.sim;
+    app.rend.selected = n; app.rend.selectedEdge = null;
     $('#inspector').classList.add('show');
     $('#inspTitle').textContent = `${M.NODE_TYPES[n.type].label} · ${n.id}`;
     const deg = (sim.graph.adj.get(n.id) || []).length;
-    let extra = '';
-    if (n.type === 'pick') extra = `<div class="insp-row"><span>적체 화물</span><b>${n.buffer}건</b></div>`;
-    if (n.type === 'pick' || n.type === 'drop') {
-      extra += `<div class="insp-row"><span>처리 누적</span><b>${n.processed}건</b></div>
-                <div class="insp-row"><span>수요 가중치</span><b>${n.priority}×</b></div>`;
-    }
+    const isPort = n.type === 'pick' || n.type === 'drop';
     $('#inspBody').innerHTML = `
-      <div class="insp-row"><span>이름</span><b>${n.name}</b></div>
+      <div class="field mb"><label>이름</label>
+        <input type="text" data-insp="name" maxlength="24" value="${esc(n.name)}"></div>
+      ${isPort ? `<div class="field mb"><label>수요 가중치 (1=기본, 2=2배 빈도)</label>
+        <input type="number" data-insp="priority" min="0.1" max="10" step="0.1" value="${n.priority}"></div>` : ''}
       <div class="insp-row"><span>좌표</span><b>${Math.round(n.x)}, ${Math.round(n.y)}</b></div>
-      <div class="insp-row"><span>연결 통로</span><b>${deg}개</b></div>
-      <div class="insp-row"><span>현재 점유</span><b>${n.occupants.length}/${app.params.port_cap}${n.queue ? ` (대기 ${n.queue})` : ''}</b></div>
-      <div class="insp-row"><span>누적 대기</span><b>${fmt.n(n.waitAccum / 60, 1)}분</b></div>
-      ${extra}`;
+      <div class="insp-row"><span>나가는 통로</span><b>${deg}개</b></div>
+      ${n.type !== 'waypoint' ? `<div class="insp-row"><span>현재 점유</span><b>${n.occupants.length}/${app.params.port_cap}${n.queue ? ` (대기 ${n.queue})` : ''}</b></div>
+      <div class="insp-row"><span>누적 대기</span><b>${fmt.n(n.waitAccum / 60, 1)}분</b></div>` : ''}
+      ${n.type === 'pick' ? `<div class="insp-row"><span>적체 화물</span><b>${n.buffer}건</b></div>` : ''}
+      ${isPort ? `<div class="insp-row"><span>처리 누적</span><b>${n.processed}건</b></div>` : ''}`;
   }
 
-  function closeInspector() { $('#inspector').classList.remove('show'); app.rend.selected = null; }
+  function showEdgeInspector(e) {
+    const L = app.layout, a = L.node(e.a), b = L.node(e.b);
+    if (!a || !b) return;
+    app.rend.selected = null; app.rend.selectedEdge = e;
+    $('#inspector').classList.add('show');
+    $('#inspTitle').textContent = `통로 · ${e.a} ↔ ${e.b}`;
+    const m = app.sim.graph.pxToM(Math.hypot(a.x - b.x, a.y - b.y));
+    const opt = (v, t) => `<option value="${v}" ${e.dir === v ? 'selected' : ''}>${t}</option>`;
+    const forced = e.dir === 'both' && app.params.bidirectional === false;
+    $('#inspBody').innerHTML = `
+      <div class="insp-row"><span>길이</span><b>${fmt.n(m, 1)} m</b></div>
+      <div class="insp-row mb"><span>누적 통과</span><b>${e.flow || 0}회</b></div>
+      <div class="field mb"><label>통행 방향</label>
+        <select data-insp="dir">${opt('both', '양방향')}${opt('ab', `${e.a} → ${e.b}`)}${opt('ba', `${e.b} → ${e.a}`)}</select></div>
+      ${forced ? `<div class="tiny mb" style="color:var(--warn)">양방향 허용이 꺼져 있어 현재 <b>${e.a} → ${e.b}</b>로만 통행합니다.</div>` : ''}
+      <div class="field mb"><label>차선 수 (동시 통행 대수)</label>
+        <input type="number" data-insp="lanes" min="1" max="4" step="1" value="${e.lanes || 1}"></div>
+      <div class="field"><label>속도 계수 (1=제한 없음, 0.5=절반 속도)</label>
+        <input type="number" data-insp="speedFactor" min="0.2" max="1" step="0.1" value="${e.speedFactor || 1}"></div>`;
+  }
+
+  function closeInspector() {
+    $('#inspector').classList.remove('show');
+    app.rend.selected = null; app.rend.selectedEdge = null;
+  }
 
   /* ================= 키보드 ================= */
   function bindKeyboard() {
     document.addEventListener('keydown', (e) => {
       if (/input|select|textarea/i.test(e.target.tagName)) return;
       const k = e.key.toLowerCase();
+
+      if (e.ctrlKey || e.metaKey) {
+        if (k === 'z') { e.preventDefault(); if (e.shiftKey) redo(); else undo(); }
+        else if (k === 'y') { e.preventDefault(); redo(); }
+        return;                       // Ctrl+C 등이 도구를 바꾸지 않도록
+      }
+      if (e.altKey) return;
+
       if (e.key === ' ') { e.preventDefault(); togglePlay(); return; }
       if (e.key === 'Escape') {
         $$('.modal.open').forEach((m) => m.classList.remove('open'));
         app.rend.edgeStart = null; closeInspector();
         return;
       }
+      if ((e.key === 'Delete' || e.key === 'Backspace') && (app.rend.selected || app.rend.selectedEdge)) {
+        e.preventDefault(); deleteSelection(); return;
+      }
       const speeds = { '1': 1, '2': 4, '3': 10, '4': 30, '5': 120 };
       if (speeds[e.key]) { setSpeed(speeds[e.key]); return; }
-      const tools = { v: 'select', h: 'pan', p: 'pick', d: 'drop', c: 'charge', n: 'waypoint', e: 'edge', x: 'delete' };
+      const tools = { v: 'select', h: 'pan', p: 'pick', d: 'drop', c: 'charge', k: 'park', n: 'waypoint', e: 'edge', x: 'delete' };
       if (tools[k]) { setTool(tools[k]); return; }
       if (k === 'f') { app.rend.fitToContent(); return; }
       if (e.key === '[') { toggleSide('left'); return; }
@@ -1123,34 +1356,38 @@
     toast(`⚡ ${spec.label} 스윕 ${rows.length}포인트 완료`, 'ok');
   }
 
-  function runMonteCarlo() {
+  async function runMonteCarlo() {
+    if (app.mcRunning) return;
     const runs = clamp(parseInt($('#mcRuns').value, 10) || 6, 1, 30);
     const horizon = clamp(parseInt($('#mcHorizon').value, 10) || 45, 5, 300);
     const est = runs * horizon;
     if (est > 900 && !confirm(`총 ${runs}회 × ${horizon}분 시뮬레이션은 수 초~수십 초가 걸릴 수 있습니다. 진행할까요?`)) return;
 
     const btn = $('#btnMonteCarlo');
+    const bar = $('#mcProgress').firstElementChild;
+    app.mcRunning = true;
     btn.disabled = true; btn.textContent = '⏳ 계산 중...';
     $('#mcProgress').style.display = '';
+    bar.style.width = '0%';
     $('#mcStatus').textContent = '초기화 중...';
 
-    setTimeout(() => {
-      try {
-        const mc = A.monteCarlo(app.sim, { runs, horizonMin: horizon, dt: 0.5 }, (i, n, k) => {
-          $('#mcProgress').firstElementChild.style.width = (i / n) * 100 + '%';
-          $('#mcStatus').textContent = `Run ${i}/${n} — ${Math.round(k.measuredUPH)} UPH`;
-        });
-        app.mc = mc;
-        renderMc(mc);
-        toast(`🎲 몬테카를로 ${runs}회 완료 — 평균 ${fmt.n(mc.uph.mean, 1)} ± ${fmt.n(mc.uph.ci, 1)} UPH`, 'ok');
-      } catch (err) {
-        toast('⚠️ 실행 실패: ' + err.message, 'err');
-        console.error(err);
-      } finally {
-        btn.disabled = false; btn.textContent = '🎲 몬테카를로 실행';
-        $('#mcProgress').style.display = 'none';
-      }
-    }, 60);
+    try {
+      const mc = await A.monteCarlo(app.sim, { runs, horizonMin: horizon, dt: 0.5 }, (i, n, k) => {
+        bar.style.width = (i / n) * 100 + '%';
+        $('#mcStatus').textContent = `Run ${i}/${n} — ${Math.round(k.measuredUPH)} UPH`;
+      });
+      app.mc = mc;
+      renderMc(mc);
+      toast(`🎲 몬테카를로 ${runs}회 완료 — 평균 ${fmt.n(mc.uph.mean, 1)} ± ${fmt.n(mc.uph.ci, 1)} UPH`, 'ok');
+    } catch (err) {
+      $('#mcStatus').textContent = '';
+      toast('⚠️ 실행 실패: ' + err.message, 'err');
+      console.error(err);
+    } finally {
+      app.mcRunning = false;
+      btn.disabled = false; btn.textContent = '🎲 몬테카를로 실행';
+      $('#mcProgress').style.display = 'none';
+    }
   }
 
   function renderMc(mc) {
@@ -1175,17 +1412,15 @@
 
   /* ================= 내보내기 ================= */
   function exportMatrixCsv() {
+    renderMatrix();                       // 거리 탭을 열지 않았어도 최신 데이터로
     const rows = app._matrixRows || [];
     if (!rows.length) { toast('내보낼 데이터가 없습니다.', 'warn'); return; }
-    const p = app.params, g = app.sim.graph;
-    const data = rows.map((r) => {
-      const tF = r.ok ? g.pathTime(r.path, p) : 0;
-      const back = r.ok ? g.pathTime(g.findPath(r.to.id, r.from.id).path, p) : 0;
-      return [r.from.id, r.from.name, r.to.id, r.to.name,
-        r.ok ? r.distM.toFixed(2) : '', isFinite(r.backM) ? r.backM.toFixed(2) : '',
-        tF.toFixed(2), (tF + back + p.t_pick + p.t_drop).toFixed(2),
-        r.turns.toFixed(0), r.ok ? r.path.join(' > ') : '', r.ok ? '연결' : '단절'];
-    });
+    const data = rows.map((r) => [
+      r.from.id, r.from.name, r.to.id, r.to.name,
+      isFinite(r.distM) ? r.distM.toFixed(2) : '', isFinite(r.backM) ? r.backM.toFixed(2) : '',
+      r.ok ? r.tF.toFixed(2) : '', r.ok ? r.cycle.toFixed(2) : '',
+      r.turns.toFixed(0), r.ok ? r.path.join(' > ') : '', r.ok ? '연결' : '단절'
+    ]);
     downloadBlob(toCSV(
       ['출발ID', '출발명', '도착ID', '도착명', '적재거리(m)', '복귀거리(m)', '적재주행(s)', '왕복사이클(s)', '누적선회(deg)', '경유경로', '상태'],
       data), `AMR_거리매트릭스_${new Date().toISOString().slice(0, 10)}.csv`, 'text/csv;charset=utf-8;');
@@ -1194,7 +1429,7 @@
 
   function exportCurveCsv() {
     const curve = app._curve || [];
-    if (!curve.length) return;
+    if (!curve.length) { toast('내보낼 데이터가 없습니다.', 'warn'); return; }
     downloadBlob(toCSV(
       ['투입대수', '예측처리량(UPH)', '사이클(s)', '포트대기(s)', '유효속도계수', '제약요인'],
       curve.map((c) => [c.n, c.uph.toFixed(1), c.cycle.toFixed(1), c.wait.toFixed(1), c.factor.toFixed(3), c.bottleneck])),
@@ -1225,7 +1460,6 @@
     const cm = A.cycleModel(sim);
     const curve = app._curve || [];
     const limits = sim.portLimits();
-    const theme = document.body.className;
 
     const L = [];
     L.push('═'.repeat(66));
@@ -1238,10 +1472,12 @@
     L.push(`  피킹 / 드롭 / 충전 : ${sim.layout.byType('pick').length} / ${sim.layout.byType('drop').length} / ${sim.layout.byType('charge').length}개`);
     L.push(`  경유 노드 / 통로   : ${sim.layout.byType('waypoint').length} / ${sim.layout.edges.length}개`);
     L.push(`  축척              : 100px = ${p.pixel_scale}m`);
+    L.push(`  양방향 통행        : ${p.bidirectional === false ? '불허 (전 통로 일방통행)' : '허용'}`);
     L.push('');
     L.push('【2. 설계 파라미터】');
     L.push(`  최고속/가속/감속   : ${p.v_max} m/s / ${p.accel} / ${p.decel} m/s²`);
-    L.push(`  도킹 (픽/드롭)     : ${p.t_pick}s / ${p.t_drop}s (CV ${p.cv_service})`);
+    L.push(`  1회 적재 수량      : ${p.payload} 개 (같은 피킹→드롭 화물 묶음 운반)`);
+    L.push(`  도킹 (픽/드롭)     : 1개당 ${p.t_pick}s / ${p.t_drop}s (CV ${p.cv_service})`);
     L.push(`  배차 알고리즘      : ${AMR.dispatch.ALGOS[p.dispatch_algo].label}`);
     L.push(`  교통 모델          : ${p.traffic_model}`);
     L.push(`  투입 대수 / OEE    : ${p.fleet}대 / ${p.oee}%`);
@@ -1254,7 +1490,7 @@
     L.push(`  드롭 포트 한계     : ${Math.round(limits.drop)} UPH`);
     L.push(`  통로 유효속도 계수 : ${fmt.pct(diag.congestion * 100, 0)}`);
     L.push('');
-    L.push('【4. 해석 모델 사이클 분해】');
+    L.push('【4. 해석 모델 사이클 분해】' + (p.payload > 1 ? ` (1회 운행 = 화물 ${p.payload}개, 만재 가정)` : ''));
     if (cm.ok) {
       L.push(`  평균 적재거리      : ${fmt.n(cm.loadedM, 1)} m`);
       L.push(`  평균 공차거리      : ${fmt.n(cm.emptyM, 1)} m`);
@@ -1263,6 +1499,8 @@
       L.push(`  충전 분할 상각     : ${fmt.n(cm.tCharge, 1)} s`);
       L.push(`  → 이론 사이클      : ${fmt.n(cm.tCycle, 1)} s`);
       L.push(`  사이클당 에너지    : ${fmt.n(cm.whPerCycle, 1)} Wh (1충전 ${fmt.n(cm.cyclesPerCharge, 0)}사이클)`);
+    } else {
+      L.push('  경로 단절로 산출 불가');
     }
     L.push('');
     L.push('【5. 시뮬레이션 실측 결과】');
@@ -1270,7 +1508,7 @@
     L.push(`  완료 / 발생        : ${k.completed} / ${sim.metrics.released} 건`);
     L.push(`  실측 처리량        : ${fmt.n(k.measuredUPH, 1)} UPH`);
     L.push(`  서비스율           : ${fmt.pct(k.serviceRate, 1)}`);
-    L.push(`  평균 사이클        : ${fmt.n(k.avgCycle, 1)} s (P90 ${fmt.n(k.p90Cycle, 1)} s)`);
+    L.push(`  평균 사이클        : ${fmt.n(k.avgCycle, 1)} s (P90 ${fmt.n(k.p90Cycle, 1)} s, 운행 단위)`);
     L.push(`  포트 대기 비중     : ${fmt.pct(k.queueShare, 1)}`);
     L.push(`  교통 정체 손실     : ${fmt.pct(k.blockShare, 1)}`);
     L.push(`  플릿 가동률        : ${fmt.pct(k.util, 1)}`);
@@ -1327,9 +1565,9 @@
   function saveState() {
     try {
       localStorage.setItem(STORE_KEY, JSON.stringify({
-        version: 2,
+        version: 3,
         params: app.params,
-        layout: app.layout.toJSON(),
+        layout: layoutData(),
         theme: document.body.className,
         snapshots: app.snapshots
       }));
@@ -1341,19 +1579,24 @@
       const raw = localStorage.getItem(STORE_KEY);
       if (!raw) return false;
       return applyState(JSON.parse(raw));
-    } catch (e) { return false; }
+    } catch (e) { console.warn('저장된 상태 복원 실패', e); return false; }
   }
 
   function applyState(d) {
-    if (!d || !d.layout) return false;
-    if (d.params) Object.keys(d.params).forEach((k) => { app.params[k] = d.params[k]; });
+    if (!d || !d.layout || !Array.isArray(d.layout.nodes)) return false;
+    if (d.params) {
+      Object.keys(d.params).forEach((k) => {
+        if (M.PARAM_MAP[k]) M.sanitize(app.params, k, d.params[k]);   // 범위 검증
+        else app.params[k] = d.params[k];
+      });
+    }
     app.layout.fromJSON(d.layout);
     if (d.theme) { document.body.className = d.theme; $('#themeSelect').value = d.theme; }
     if (d.snapshots) app.snapshots = d.snapshots;
 
     M.PARAM_SPEC.forEach((s) => syncParamUI(s.key));
-    $('#chkAutoRelease').checked = app.params.auto_release;
-    $('#txtAutoRelease').textContent = app.params.auto_release ? 'ON' : 'OFF';
+    $('#chkAutoRelease').checked = !!app.params.auto_release;
+    syncAutoReleaseLabel();
     $('#selReleaseMode').value = app.params.release_mode;
     $('#selDispatch').value = app.params.dispatch_algo;
     $('#selTraffic').value = app.params.traffic_model;
@@ -1362,12 +1605,17 @@
     $('#chkFailures').checked = !!app.params.failures;
     $('#inpSeed').value = app.params.seed;
     updateDispatchDesc();
+    syncSweepRange();
 
+    closeInspector();
+    app.rend.edgeStart = null;
     app.sim.graph.rebuild();
     app.sim.reset();
     app.rend.fitToContent();
     refreshStations();
+    refreshLive();
     refreshAnalytics();
+    renderScenarios();
     C.retheme();
     return true;
   }

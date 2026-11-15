@@ -50,10 +50,27 @@
     }, extra || {});
   }
 
+  /**
+   * 차트 생성 또는 갱신.
+   * 같은 캔버스·같은 타입의 차트가 이미 있으면 파괴하지 않고 데이터만 교체해
+   * 주기적 갱신 시 깜빡임과 툴팁 사라짐을 막는다.
+   */
   function make(id, config) {
     const el = document.getElementById(id);
     if (!el || !global.Chart) return null;
-    if (charts[id]) { charts[id].destroy(); delete charts[id]; }
+    const old = charts[id];
+    if (old && old.canvas === el && old.config.type === config.type) {
+      old.data.labels = config.data.labels;
+      config.data.datasets.forEach((ds, i) => {
+        if (old.data.datasets[i]) Object.assign(old.data.datasets[i], ds);
+        else old.data.datasets[i] = ds;
+      });
+      old.data.datasets.length = config.data.datasets.length;
+      old.options = config.options;
+      old.update('none');           // 애니메이션 없이 갱신
+      return old;
+    }
+    if (old) { old.destroy(); delete charts[id]; }
     charts[id] = new global.Chart(el.getContext('2d'), config);
     return charts[id];
   }
@@ -153,7 +170,7 @@
       else if (r.state === S.CHARGING || r.state === S.TO_CHARGE || r.state === S.QUEUE_CHARGE) buckets['충전']++;
       else if (String(r.state).startsWith('queue')) buckets['포트 대기']++;
       else if (r.state === S.IDLE) buckets['유휴']++;
-      else if (r.speed < 0.05) buckets['정체']++;
+      else if (r.speed < 0.05 && (r.state === S.TO_PICK || r.state === S.TO_DROP)) buckets['정체']++;
       else buckets['작업 중']++;
     });
     return make(id, {

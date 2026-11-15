@@ -1,7 +1,8 @@
 /* =========================================================
  * AMR Capa Simulator PRO — Simulation Engine
  * 물리 주행(가감속/선회) · 간선 예약 기반 교통 · 차간거리 ·
- * 에너지 기반 배터리 · 고장/복구 · 포트 큐 · 통계 수집
+ * 에너지 기반 배터리 · 고장/복구 · 포트 큐 · 묶음 적재 · 통계 수집
+ * 교착 해소(간선 예약 · 우회 재탐색 · 순환 대기 감지)
  * ========================================================= */
 (function (global) {
   'use strict';
@@ -31,6 +32,14 @@
     to_park: '🟣 대기존이동', blocked: '🔴 정체', fault: '🛠 고장'
   };
 
+  /* 정차 중(포트·대기 위치)인 상태 — 차간거리 장애물에서 제외 */
+  const DOCKED = new Set([
+    STATE.IDLE, STATE.QUEUE_PICK, STATE.LOADING, STATE.QUEUE_DROP,
+    STATE.UNLOADING, STATE.QUEUE_CHARGE, STATE.CHARGING
+  ]);
+  const DL_WAIT = 4;    // 이 시간(초) 이상 막히면 우회·교착 검사 시작
+  const DL_MAX = 45;    // 이 시간 이상 정지하면 교착으로 기록하고 재시도
+
   /* ===================== Robot ===================== */
   class Robot {
     constructor(id, node, sim) {
@@ -45,8 +54,10 @@
       this.path = [];
       this.state = STATE.IDLE;
       this.job = null;
+      this.batch = [];                // 묶음 적재된 추가 작업
       this.cargo = 0;
       this.timer = 0;
+      this.dropPathReady = false;
       this.soc = 60 + sim.rng.range(0, 35);  // %
       this.heldEdge = null;           // 예약 중인 간선 key
       this.heldPort = null;           // 점유 포트 id
@@ -60,6 +71,8 @@
       this.tripStart = 0; this.tripQueue = 0; this.tripTravel = 0;
       this.nextFault = sim.params.failures ? sim.rng.exp(sim.params.mtbf * 60) : Infinity;
       this.faultTimer = 0;
+      // 교착 해소용
+      this.stuckT = 0; this.waitFor = null; this.rerouted = false; this._front = null;
     }
 
     get p() { return this.sim.params; }
@@ -68,9 +81,12 @@
     setPath(path) {
       this.path = (path && path.length > 1) ? path.slice(1) : [];
       this.nextNode = this.path.length ? this.path[0] : null;
+      this.clearStall();
     }
 
     targetNodeObj() { return this.nextNode ? this.sim.layout.node(this.nextNode) : null; }
+
+    clearStall() { this.stuckT = 0; this.waitFor = null; this.rerouted = false; }
 
     /* --- 교통: 전방 간선 진입 가능 여부 --- */
     canEnterEdge(fromId, toId) {
@@ -78,44 +94,50 @@
       if (p.traffic_model === 'none') return true;
       const key = this.sim.layout.edgeKey(fromId, toId);
       if (this.heldEdge === key) return true;
+      if (p.traffic_model !== 'reservation') return true; // softgap: 차간거리로만 제어
+      const edge = this.sim.layout.edgeBetween(fromId, toId);
+      const lanes = edge ? (edge.lanes || 1) : 1;
       const occ = this.sim.edgeOccupancy.get(key);
       if (!occ || occ.size === 0) return true;
-      if (p.traffic_model === 'reservation') {
-        const edge = this.sim.layout.edges.find(
-          (e) => (e.a === fromId && e.b === toId) || (e.a === toId && e.b === fromId)
-        );
-        const lanes = edge ? (edge.lanes || 1) : 1;
-        if (occ.size < lanes) return true;
-        // 같은 방향이면 차간거리 모델로 추종 허용
-        for (const rid of occ) {
-          const other = this.sim.robotMap.get(rid);
-          if (!other || other === this) continue;
-          const sameDir = other.atNode === fromId || other.nextNode === toId;
-          if (!sameDir) return false;
-        }
-        return occ.size < lanes + 1;
+      let first = null;
+      for (const rid of occ) {
+        const other = this.sim.robotMap.get(rid);
+        if (!other || other === this) continue;
+        if (!first) first = other;
+        // 단일 차선에서는 반대 방향 차량과 마주 보는 진입을 막음
+        if (lanes === 1 && other.nextNode === fromId) { this.waitFor = other.id; return false; }
       }
-      return true; // softgap: 간선 진입은 허용하고 차간거리로만 제어
+      if (occ.size < lanes + 1) return true;
+      this.waitFor = first ? first.id : null;
+      return false;
     }
 
     /** 전방 차량과의 간격(m). 없으면 Infinity */
     frontGapM() {
+      this._front = null;
       if (this.p.traffic_model === 'none' || !this.nextNode) return Infinity;
       const tgt = this.targetNodeObj();
       if (!tgt) return Infinity;
+      const eg = this.atNode ? this.sim.layout.edgeBetween(this.atNode, this.nextNode) : null;
+      const edgeKey = this.atNode ? this.sim.layout.edgeKey(this.atNode, this.nextNode) : null;
+      const multi = !!eg && (eg.lanes || 1) >= 2;
       const dirx = tgt.x - this.x, diry = tgt.y - this.y;
       const len = Math.hypot(dirx, diry) || 1;
       const ux = dirx / len, uy = diry / len;
       let gap = Infinity;
       const near = this.sim.spatial.query(this.x, this.y, 140);
       for (const o of near) {
-        if (o === this) continue;
+        if (o === this || DOCKED.has(o.state)) continue;       // 정차 차량 제외
+        if (!edgeKey || !o.atNode || !o.nextNode ||
+          this.sim.layout.edgeKey(o.atNode, o.nextNode) !== edgeKey) continue;
+        if (multi && o.nextNode === this.atNode && o.atNode === this.nextNode) continue; // 반대 차선
         const dx = o.x - this.x, dy = o.y - this.y;
         const proj = dx * ux + dy * uy;
         if (proj <= 0.1) continue;                    // 뒤쪽
         const lat = Math.abs(-dx * uy + dy * ux);
         if (lat > 16) continue;                       // 다른 차선
-        gap = Math.min(gap, this.g.pxToM(proj));
+        const m = this.g.pxToM(proj);
+        if (m < gap) { gap = m; this._front = o; }
       }
       return gap;
     }
@@ -136,29 +158,85 @@
       this.heldEdge = null;
     }
 
+    /* --- 교착 해소 --- */
+    /** 서로 기다리는 고리(A→B→…→A)에 내가 포함되어 있는가 */
+    inCycle() {
+      let cur = this;
+      for (let n = 0; n < 64; n++) {
+        const nx = cur.waitFor ? this.sim.robotMap.get(cur.waitFor) : null;
+        if (!nx || DOCKED.has(nx.state) || nx.state === STATE.FAULT || nx.stuckT < 1) return false;
+        if (nx === this) return true;
+        cur = nx;
+      }
+      return false;
+    }
+
+    /** 막힌 간선을 제외해 우회 경로 탐색 (노드 위에 서 있을 때만) */
+    tryReroute() {
+      const dest = this.path[this.path.length - 1];
+      const here = this.atNode ? this.sim.layout.node(this.atNode) : null;
+      if (!dest || !here || !this.nextNode) return false;
+      if (Math.hypot(here.x - this.x, here.y - this.y) > 2) return false;
+      const g = this.g;
+      const key = this.sim.layout.edgeKey(this.atNode, this.nextNode);
+      const r = g.findPath(this.atNode, dest, true, key);
+      if (!r.ok || !r.path || r.path.length < 2 || r.path[1] === this.nextNode) return false;
+      this.path = r.path.slice(1);
+      this.nextNode = this.path[0];
+      return true;
+    }
+
+    /** 정지 상태 누적 → 막힌 간선 우회 → 교착 감지 */
+    stalled(dt, atEdge) {
+      const m = this.sim.metrics;
+      this.stuckT += dt;
+      if (this.stuckT < DL_WAIT) return;
+      if (atEdge && !this.rerouted) {
+        this.rerouted = true;
+        if (this.tryReroute()) {
+          this.stuckT = 0; this.waitFor = null;
+          m.reroutes = (m.reroutes || 0) + 1;
+          return;
+        }
+      }
+      if (this.inCycle() && !this.rerouted) {
+        this.rerouted = true;
+        if (this.tryReroute()) {
+          this.stuckT = 0; this.waitFor = null;
+          m.reroutes = (m.reroutes || 0) + 1;
+        }
+        m.deadlocks = (m.deadlocks || 0) + 1;
+      } else if (this.stuckT >= DL_MAX) {
+        this.stuckT = 0; this.waitFor = null; this.rerouted = false;
+        m.deadlocks = (m.deadlocks || 0) + 1;
+      }
+    }
+
     /**
      * 경로 추종 (사다리꼴 속도 프로파일 + 차간거리 감속)
+     * 주행 전력은 이 안에서 차감한다.
      * @returns true 면 경로 종료(도착)
      */
     drive(dt) {
       const p = this.p;
       if (!this.nextNode) {
-        if (!this.path.length) { this.releaseEdge(); this.speed = 0; return true; }
+        if (!this.path.length) { this.releaseEdge(); this.speed = 0; this.clearStall(); return true; }
         this.nextNode = this.path[0];
       }
       const tgt = this.targetNodeObj();
-      if (!tgt) { this.path = []; this.nextNode = null; this.releaseEdge(); return true; }
+      if (!tgt) { this.path = []; this.nextNode = null; this.releaseEdge(); this.clearStall(); return true; }
 
-      // 간선 진입 예약
+      // 간선 진입 예약 (막히면 예약 없이 진입하지 않고 그 자리에 정지)
       if (this.atNode && this.atNode !== tgt.id && Math.hypot(tgt.x - this.x, tgt.y - this.y) > 1) {
         if (!this.canEnterEdge(this.atNode, tgt.id)) {
-          this.speed = Math.max(0, this.speed - p.decel * dt * 2);
+          this.speed = 0;
           this.tBlocked += dt;
           this.sim.metrics.blockedTime += dt;
-          if (this.speed < 0.02) { this.sim.metrics.blockEvents += dt; return false; }
-        } else {
-          this.acquireEdge(this.atNode, tgt.id);
+          this.sim.metrics.blockEvents += dt;
+          this.stalled(dt, true);
+          return false;
         }
+        this.acquireEdge(this.atNode, tgt.id);
       }
 
       const dx = tgt.x - this.x, dy = tgt.y - this.y;
@@ -174,25 +252,38 @@
       const maxTurn = (p.turn_speed * Math.PI / 180) * dt;
       this.heading += clamp(dh, -maxTurn, maxTurn);
 
-      let vTarget = p.v_max;
-      if (turnDeg > p.turn_thresh) vTarget = p.v_max * clamp(1 - turnDeg / 180, 0.18, 1);
+      // 구간 속도 계수 (통로별 제한속도)
+      const eg = (this.atNode && this.atNode !== tgt.id)
+        ? this.sim.layout.edgeBetween(this.atNode, tgt.id) : null;
+      const vLim = p.v_max * (eg ? (eg.speedFactor || 1) : 1);
+      let vTarget = vLim;
+      if (turnDeg > p.turn_thresh) vTarget = vLim * clamp(1 - turnDeg / 180, 0.18, 1);
 
       // 정지 거리 제약(다음 노드가 경로의 끝이면 감속 정지)
       const isLast = this.path.length <= 1;
       if (isLast) vTarget = Math.min(vTarget, Math.sqrt(Math.max(0, 2 * p.decel * distM)));
 
       // 차간거리 제약 (IDM 간이형)
+      let gapStop = false;
       const gap = this.frontGapM();
       if (isFinite(gap)) {
         const safe = p.safety_gap;
-        if (gap < safe * 0.6) vTarget = 0;
-        else if (gap < safe * 3) vTarget = Math.min(vTarget, p.v_max * clamp((gap - safe * 0.6) / (safe * 2.4), 0, 1));
+        if (gap < safe * 0.6) { vTarget = 0; gapStop = true; }
+        else if (gap < safe * 3) vTarget = Math.min(vTarget, vLim * clamp((gap - safe * 0.6) / (safe * 2.4), 0, 1));
       }
 
       // 가감속 적용
       if (vTarget > this.speed) this.speed = Math.min(vTarget, this.speed + p.accel * dt);
       else this.speed = Math.max(vTarget, this.speed - p.decel * dt);
-      if (this.speed < 0.015 && vTarget <= 0.02) { this.tBlocked += dt; this.sim.metrics.blockedTime += dt; }
+      if (this.speed < 0.015 && vTarget <= 0.02) {
+        this.tBlocked += dt; this.sim.metrics.blockedTime += dt;
+        if (gapStop) {
+          this.waitFor = this._front ? this._front.id : null;
+          this.stalled(dt, false);
+        }
+      } else if (this.speed > 0.05) {
+        this.clearStall();
+      }
 
       const stepM = this.speed * dt;
       this.distM += stepM;
@@ -206,7 +297,12 @@
         this.nextNode = this.path.length ? this.path[0] : null;
         // 혼잡 기록
         this.sim.noteEdgeFlow(this.heldEdge);
-        if (!this.nextNode) { this.releaseEdge(); this.speed = Math.min(this.speed, 0.4); return true; }
+        this.releaseEdge();
+        if (!this.nextNode) {
+          this.clearStall();
+          this.speed = Math.min(this.speed, 0.4);
+          return true;
+        }
         return false;
       }
       const stepPx = this.g.mToPx(stepM);
@@ -244,11 +340,66 @@
       this.heldPort = null;
     }
 
+    /** 대기열에서 빠질 때 포트의 대기 카운터 정리 (상태 변경 전에 호출) */
+    leaveQueue() {
+      let id = null;
+      if (this.state === STATE.QUEUE_PICK) id = this.job && this.job.from;
+      else if (this.state === STATE.QUEUE_DROP) id = this.job && this.job.to;
+      else if (this.state === STATE.QUEUE_CHARGE) id = this.atNode;
+      const n = id && this.sim.layout.node(id);
+      if (n) n.queue = Math.max(0, n.queue - 1);
+    }
+
     goto(targetId, useCongestion) {
       const r = this.g.findPath(this.atNode, targetId, useCongestion);
       if (!r.ok) return false;
       this.setPath(r.path);
       return true;
+    }
+
+    /* --- 묶음 적재 / 하역 --- */
+    /** 같은 피킹대→같은 드롭의 대기 작업을 payload까지 묶고, 수량만큼 적재시간 부여 */
+    beginLoading() {
+      const p = this.p, S = this.sim;
+      this.batch = [];
+      if (p.payload > 1) {
+        for (const j of S.jobs) {
+          if (this.batch.length >= p.payload - 1) break;
+          if (j.status === 'pending' && j.from === this.job.from && j.to === this.job.to) {
+            j.status = 'loading'; j.robot = this.id; j.tAssigned = this.job.tAssigned;
+            this.batch.push(j);
+          }
+        }
+      }
+      let t = 0;
+      for (let i = 0; i <= this.batch.length; i++) t += S.rng.service(p.t_pick, p.cv_service);
+      this.timer = t;
+      this.dropPathReady = this.goto(this.job.to, p.traffic_model !== 'none');
+      if (this.dropPathReady && p.traffic_model === 'reservation' && this.atNode && this.nextNode &&
+        this.canEnterEdge(this.atNode, this.nextNode)) this.acquireEdge(this.atNode, this.nextNode);
+      this.state = STATE.LOADING;
+      this.job.status = 'loading';
+    }
+
+    /** 실은 수량만큼 하역시간 부여 */
+    beginUnloading() {
+      const p = this.p;
+      let t = 0;
+      for (let i = 0; i < Math.max(1, this.cargo); i++) t += this.sim.rng.service(p.t_drop, p.cv_service);
+      this.timer = t;
+      this.state = STATE.UNLOADING;
+    }
+
+    /** 담당 작업 전부를 대기 상태로 반환 (이미 실었다면 화물도 피킹대로 복귀) */
+    releaseJobs() {
+      const all = this.job ? [this.job, ...this.batch] : [];
+      if (this.cargo > 0 && all.length) {
+        const n = this.sim.layout.node(all[0].from);
+        if (n) { n.buffer += all.length; n.processed = Math.max(0, n.processed - all.length); }
+      }
+      all.forEach((j) => { j.status = 'pending'; j.robot = null; });
+      this.job = null; this.batch = []; this.cargo = 0;
+      this.dropPathReady = false;
     }
 
     /* ===================== 상태 머신 ===================== */
@@ -265,11 +416,14 @@
         }
         this.nextFault -= dt;
         if (this.nextFault <= 0 && this.state !== STATE.CHARGING) {
+          this.leaveQueue();
           this.state = STATE.FAULT;
           this.faultTimer = Math.max(5, S.rng.service(p.mttr * 60, 0.4));
           this.releaseEdge(); this.releasePort();
-          if (this.job) { this.job.status = 'pending'; this.job.robot = null; this.job = null; }
-          this.cargo = 0; this.speed = 0;
+          this.releaseJobs();
+          this.path = []; this.nextNode = null;
+          this.speed = 0;
+          this.clearStall();
           S.metrics.faults++;
           return;
         }
@@ -292,9 +446,7 @@
           this.taskLabel = `[${this.job.id}] ${node.name} 이동`;
           if (this.drive(dt)) {
             if (this.tryOccupy(node)) {
-              this.state = STATE.LOADING;
-              this.timer = S.rng.service(p.t_pick, p.cv_service);
-              this.job.status = 'loading';
+              this.beginLoading();
             } else {
               this.state = STATE.QUEUE_PICK;
               node.queue++;
@@ -314,8 +466,7 @@
           this.taskLabel = `⏳ ${node.name} 포트 대기`;
           if (this.tryOccupy(node)) {
             node.queue = Math.max(0, node.queue - 1);
-            this.state = STATE.LOADING;
-            this.timer = S.rng.service(p.t_pick, p.cv_service);
+            this.beginLoading();
           }
           break;
         }
@@ -324,16 +475,18 @@
           this.tBusy += dt;
           this.consume(dt, false);
           this.timer -= dt;
-          this.taskLabel = `적재 중 (${Math.max(0, this.timer).toFixed(0)}s)`;
+          const qty = 1 + this.batch.length;
+          this.taskLabel = `적재 중 ${qty > 1 ? qty + '개 ' : ''}(${Math.max(0, this.timer).toFixed(0)}s)`;
           if (this.timer <= 0) {
             const node = S.layout.node(this.job.from);
-            const take = Math.min(p.payload, Math.max(1, node ? node.buffer : 1));
-            this.cargo = take;
-            if (node) { node.buffer = Math.max(0, node.buffer - take); node.processed += take; }
+            this.cargo = qty;
+            if (node) { node.buffer = Math.max(0, node.buffer - qty); node.processed += qty; }
             this.releasePort();
-            if (this.goto(this.job.to, p.traffic_model !== 'none')) {
+            if (this.dropPathReady) {
               this.state = STATE.TO_DROP;
               this.job.status = 'moving';
+              this.batch.forEach((j) => (j.status = 'moving'));
+              this.dropPathReady = false;
             } else { this.abortJob(); }
           }
           break;
@@ -343,11 +496,10 @@
           this.tBusy += dt;
           const node = S.layout.node(this.job?.to);
           if (!node) { this.abortJob(); break; }
-          this.taskLabel = `[${this.job.id}] ${node.name} 이송`;
+          this.taskLabel = `[${this.job.id}] ${node.name} 이송${this.cargo > 1 ? ' ×' + this.cargo : ''}`;
           if (this.drive(dt)) {
             if (this.tryOccupy(node)) {
-              this.state = STATE.UNLOADING;
-              this.timer = S.rng.service(p.t_drop, p.cv_service);
+              this.beginUnloading();
             } else {
               this.state = STATE.QUEUE_DROP;
               node.queue++;
@@ -367,8 +519,7 @@
           this.taskLabel = `⏳ ${node.name} 포트 대기`;
           if (this.tryOccupy(node)) {
             node.queue = Math.max(0, node.queue - 1);
-            this.state = STATE.UNLOADING;
-            this.timer = S.rng.service(p.t_drop, p.cv_service);
+            this.beginUnloading();
           }
           break;
         }
@@ -377,23 +528,23 @@
           this.tBusy += dt;
           this.consume(dt, false);
           this.timer -= dt;
-          this.taskLabel = `하역 중 (${Math.max(0, this.timer).toFixed(0)}s)`;
+          this.taskLabel = `하역 중 ${this.cargo > 1 ? this.cargo + '개 ' : ''}(${Math.max(0, this.timer).toFixed(0)}s)`;
           if (this.timer <= 0) {
             const node = S.layout.node(this.job.to);
-            if (node) node.processed += this.cargo;
-            S.completeJob(this, this.job);
-            this.cargo = 0;
+            const all = [this.job, ...this.batch];
+            if (node) node.processed += all.length;
+            all.forEach((j, i) => S.completeJob(this, j, i === 0));
+            this.jobsDone += all.length;
+            this.cargo = 0; this.batch = []; this.job = null;
             this.releasePort();
-            this.job = null;
-            this.jobsDone++;
-            this.state = this.needCharge() && S.layout.byType('charge').length ? STATE.IDLE : STATE.IDLE;
+            this.state = STATE.IDLE;
           }
           break;
         }
 
         case STATE.TO_CHARGE: {
           this.taskLabel = '⚡ 충전소 이동';
-          this.consume(dt, true);
+          // 주행 전력은 drive() 안에서 차감됨
           if (this.drive(dt)) {
             const node = S.layout.node(this.atNode);
             if (node && this.tryOccupy(node)) this.state = STATE.CHARGING;
@@ -426,7 +577,6 @@
 
         case STATE.TO_PARK: {
           this.tIdle += dt;
-          this.consume(dt, true);
           this.taskLabel = '🅿 대기존 이동';
           if (this.drive(dt)) this.state = STATE.IDLE;
           break;
@@ -435,10 +585,11 @@
     }
 
     abortJob() {
-      if (this.job) { this.job.status = 'pending'; this.job.robot = null; }
-      this.job = null; this.cargo = 0;
+      this.leaveQueue();
+      this.releaseJobs();
       this.releaseEdge(); this.releasePort();
       this.path = []; this.nextNode = null;
+      this.clearStall();
       this.state = STATE.IDLE;
     }
 
@@ -465,6 +616,7 @@
       job.robot = this.id;
       job.tAssigned = this.sim.t;
       this.job = job;
+      this.batch = [];
       this.tripStart = this.sim.t;
       this.tripQueue = 0;
       if (!this.goto(job.from, this.p.traffic_model !== 'none')) { this.abortJob(); return false; }
@@ -527,12 +679,14 @@
       this.utilSeries = [];
       this.metrics = {
         completed: 0, blockedTime: 0, blockEvents: 0, portWaitEvents: 0,
-        faults: 0, chargeWh: 0, released: 0
+        faults: 0, chargeWh: 0, released: 0, reroutes: 0, deadlocks: 0
       };
       this.layout.nodes.forEach((n) => {
         n.occupants = []; n.queue = 0; n.buffer = 0; n.processed = 0; n.waitAccum = 0;
       });
       this.layout.edges.forEach((e) => { e.flow = 0; e.load = 0; });
+      this.graph.congestion.clear();
+      this._congTick = 0; this._sampleTick = 0;
       if (hard !== false) this.rng.reset(this.params.seed);
       this.spawnFleet();
     }
@@ -575,9 +729,7 @@
     noteEdgeFlow(key) {
       if (!key) return;
       const [a, b] = key.split('|');
-      const e = this.layout.edges.find(
-        (x) => (x.a === a && x.b === b) || (x.a === b && x.b === a)
-      );
+      const e = this.layout.edgeBetween(a, b);
       if (e) e.flow++;
     }
 
@@ -598,19 +750,11 @@
       return job;
     }
 
-    pickDropPair() {
-      const picks = this.layout.byType('pick'), drops = this.layout.byType('drop');
-      if (!picks.length || !drops.length) return null;
-      const d = this.rng.weighted(drops, (n) => n.priority || 1);
-      return { picks, drops, d };
-    }
-
     generateDemand(dt) {
       const p = this.params;
       if (!p.auto_release) return;
-      const sel = this.pickDropPair();
-      if (!sel) return;
-      const { picks, drops } = sel;
+      const picks = this.layout.byType('pick'), drops = this.layout.byType('drop');
+      if (!picks.length || !drops.length) return;
       const peak = p.peak_ratio > 1
         ? 1 + (p.peak_ratio - 1) * 0.5 * (1 + Math.sin((this.t / 1800) * Math.PI * 2))
         : 1;
@@ -659,10 +803,12 @@
       return n;
     }
 
-    completeJob(robot, job) {
+    /** primary=false 는 묶음의 추가 화물 — 완료 건수만 세고 사이클 표본은 운행당 1개 */
+    completeJob(robot, job, primary = true) {
       job.status = 'done';
       job.tDone = this.t;
       this.metrics.completed++;
+      if (!primary) return;
       const cycle = job.tDone - (job.tAssigned || job.tCreated);
       this.cycleSamples.push(cycle);
       this.queueSamples.push(robot.tripQueue);
@@ -727,7 +873,8 @@
       const avgQueue = this.queueSamples.length ? this.queueSamples.mean() : 0;
       const charging = this.robots.filter((r) => r.state === STATE.CHARGING || r.state === STATE.TO_CHARGE).length;
       const faulted = this.robots.filter((r) => r.state === STATE.FAULT).length;
-      const blocked = this.robots.reduce((a, r) => a + r.tBlocked, 0) / (this.robots.length * t);
+      const blocked = this.robots.length
+        ? this.robots.reduce((a, r) => a + r.tBlocked, 0) / (this.robots.length * t) : 0;
       const measuredUPH = (done / t) * 3600;
       const demandUPH = this.demandUPH();
       const energy = this.robots.reduce((a, r) => a + r.energyWh, 0);
@@ -757,6 +904,8 @@
         })(),
         portWaitEvents: this.metrics.portWaitEvents,
         faults: this.metrics.faults,
+        reroutes: this.metrics.reroutes || 0,
+        deadlocks: this.metrics.deadlocks || 0,
         oeeAdjUPH: measuredUPH * (p.oee / 100)
       };
     }
@@ -770,15 +919,18 @@
       return (p.release_mode === 'total' ? base : base * picks) * (p.peak_ratio > 1 ? peakAvg : 1);
     }
 
-    /** 포트 물리 한계 (UPH) */
+    /**
+     * 포트 물리 한계 (UPH, 화물 개수 기준).
+     * 적재·하역 시간이 수량에 비례하므로 payload 와 무관하다.
+     */
     portLimits() {
       const p = this.params;
       const picks = this.layout.byType('pick').length;
       const drops = this.layout.byType('drop').length;
       const chargers = this.layout.byType('charge').length;
       return {
-        pick: picks * p.port_cap * (3600 / Math.max(1, p.t_pick)) * p.payload,
-        drop: drops * p.port_cap * (3600 / Math.max(1, p.t_drop)) * p.payload,
+        pick: picks * p.port_cap * (3600 / Math.max(1, p.t_pick)),
+        drop: drops * p.port_cap * (3600 / Math.max(1, p.t_drop)),
         charger: chargers
       };
     }

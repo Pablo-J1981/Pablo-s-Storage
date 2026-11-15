@@ -103,7 +103,27 @@
   }
 
   function pendingJobs(sim) {
-    return sim.jobs.filter((j) => j.status === 'pending');
+    // Reservation-mode admission control prevents station queues from gridlocking narrow aisles.
+    const cap = sim.params.traffic_model === 'reservation' ? 1 : Math.max(1, sim.params.port_cap);
+    const fromSlots = new Map();
+    const toSlots = new Map();
+    for (const r of sim.robots) {
+      if (!r.job || r.job.status === 'pending' || r.job.status === 'done') continue;
+      fromSlots.set(r.job.from, (fromSlots.get(r.job.from) || 0) + 1);
+      toSlots.set(r.job.to, (toSlots.get(r.job.to) || 0) + 1);
+    }
+
+    const available = [];
+    for (const job of sim.jobs) {
+      if (job.status !== 'pending' || !sim.graph.findPath(job.from, job.to).ok) continue;
+      const fromFree = cap - (fromSlots.get(job.from) || 0);
+      const toFree = cap - (toSlots.get(job.to) || 0);
+      if (fromFree <= 0 || toFree <= 0) continue;
+      available.push(job);
+      fromSlots.set(job.from, (fromSlots.get(job.from) || 0) + 1);
+      toSlots.set(job.to, (toSlots.get(job.to) || 0) + 1);
+    }
+    return available;
   }
 
   let rrCursor = 0;

@@ -23,9 +23,11 @@
       };
       this.hover = null;
       this.hoverEdge = null;
-      this.selected = null;
+      this.selected = null;       // 선택된 노드
+      this.selectedEdge = null;   // 선택된 통로
       this.edgeStart = null;
       this.ghost = null;
+      this.mouseWorld = null;
       this.dpr = Math.min(2, global.devicePixelRatio || 1);
     }
 
@@ -63,7 +65,7 @@
       this.view.y = (this.h - bh * k) / 2 - y0 * k;
     }
 
-    nodeAt(wp, r = 22) {
+    nodeAt(wp) {
       const ns = this.sim.layout.nodes;
       for (let i = ns.length - 1; i >= 0; i--) {
         const n = ns[i];
@@ -95,8 +97,9 @@
     }
 
     draw() {
-      const ctx = this.ctx, sim = this.sim, L = sim.layout;
-      const dark = document.body.classList.contains('theme-dark');
+      const ctx = this.ctx;
+      const cl = document.body.classList;
+      const dark = cl.contains('theme-dark') || cl.contains('theme-midnight');
       ctx.save();
       ctx.scale(this.dpr, this.dpr);
       ctx.clearRect(0, 0, this.w, this.h);
@@ -155,6 +158,8 @@
         const occ = sim.edgeOccupancy.get(key);
         const busy = occ ? occ.size : 0;
         const isHover = this.hoverEdge === e;
+        const isSel = this.selectedEdge === e;
+        const dir = g.effDir(e);   // 전역 '양방향 허용' 해제 반영
 
         ctx.save();
         if (cong > 0.05) {
@@ -165,34 +170,37 @@
           ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
           ctx.globalAlpha = 1;
         }
-        ctx.strokeStyle = isHover ? '#f43f5e' : (busy > 0 ? '#f59e0b' : (dark ? 'rgba(148,163,184,0.45)' : 'rgba(100,116,139,0.5)'));
-        ctx.lineWidth = isHover ? 4 : (e.lanes > 1 ? 3.4 : 2.2);
-        if (e.dir === 'both') ctx.setLineDash([7, 5]); else ctx.setLineDash([]);
+        ctx.strokeStyle = isSel ? '#0ea5e9' : isHover ? '#f43f5e'
+          : (busy > 0 ? '#f59e0b' : (dark ? 'rgba(148,163,184,0.45)' : 'rgba(100,116,139,0.5)'));
+        ctx.lineWidth = isSel ? 4.5 : isHover ? 4 : (e.lanes > 1 ? 3.4 : 2.2);
+        if (dir === 'both') ctx.setLineDash([7, 5]); else ctx.setLineDash([]);
         ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
         ctx.setLineDash([]);
 
         // 방향 화살표 (일방통행)
-        if (this.show.arrows && e.dir !== 'both') {
-          const fwd = e.dir === 'ab';
+        if (this.show.arrows && dir !== 'both') {
+          const fwd = dir === 'ab';
           const sx = fwd ? a.x : b.x, sy = fwd ? a.y : b.y;
           const ex = fwd ? b.x : a.x, ey = fwd ? b.y : a.y;
           const ang = Math.atan2(ey - sy, ex - sx);
-          const mx = (sx + ex) / 2, my = (sy + ey) / 2;
+          // 거리 라벨과 겹치지 않도록 65% 지점에 표시
+          const mx = sx + (ex - sx) * 0.68, my = sy + (ey - sy) * 0.68;
           ctx.fillStyle = '#0ea5e9';
           ctx.save(); ctx.translate(mx, my); ctx.rotate(ang);
           ctx.beginPath(); ctx.moveTo(9, 0); ctx.lineTo(-6, 5.5); ctx.lineTo(-6, -5.5); ctx.closePath(); ctx.fill();
           ctx.restore();
         }
 
-        // 거리 라벨
+        // 거리 라벨 (+ 차선 수 / 속도 계수)
         if (this.show.dist && k > 0.55) {
           const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
           const m = g.pxToM(Math.hypot(a.x - b.x, a.y - b.y));
-          const txt = `${m.toFixed(1)}m`;
+          const sf = e.speedFactor || 1;
+          const txt = `${m.toFixed(1)}m${e.lanes > 1 ? ' ×' + e.lanes : ''}${sf < 1 ? ' ⏷' + Math.round(sf * 100) + '%' : ''}`;
           ctx.font = `700 ${10 / Math.max(0.7, Math.min(1.3, k))}px "Pretendard","Nanum Gothic",sans-serif`;
           const tw = ctx.measureText(txt).width;
           ctx.fillStyle = dark ? 'rgba(15,23,42,0.92)' : 'rgba(255,255,255,0.94)';
-          ctx.strokeStyle = cong > 0.3 ? this.heatColor(cong) : (dark ? '#334155' : '#cbd5e1');
+          ctx.strokeStyle = isSel ? '#0ea5e9' : cong > 0.3 ? this.heatColor(cong) : (dark ? '#334155' : '#cbd5e1');
           ctx.lineWidth = 1.2;
           const bw = tw + 10, bh = 15;
           ctx.beginPath(); ctx.roundRect(mx - bw / 2, my - bh / 2, bw, bh, 4); ctx.fill(); ctx.stroke();
@@ -217,14 +225,15 @@
 
     drawNodes(dark) {
       const ctx = this.ctx, sim = this.sim;
+      const selCol = dark ? '#38bdf8' : '#0f172a';
       sim.layout.nodes.forEach((n) => {
         const isHover = this.hover === n;
-        const isSel = this.selected === n;
+        const isSel = this.selected === n || this.edgeStart === n;
         const col = PALETTE[n.type] || '#94a3b8';
         ctx.save();
 
         if (n.type === 'waypoint') {
-          ctx.fillStyle = isSel ? '#0f172a' : (isHover ? '#0ea5e9' : (dark ? 'rgba(148,163,184,0.6)' : '#94a3b8'));
+          ctx.fillStyle = isSel ? selCol : (isHover ? '#0ea5e9' : (dark ? 'rgba(148,163,184,0.6)' : '#94a3b8'));
           ctx.beginPath(); ctx.arc(n.x, n.y, isSel || isHover ? 6 : 4.2, 0, Math.PI * 2); ctx.fill();
           if (this.show.ids && this.view.k > 1.1) {
             ctx.fillStyle = dark ? '#64748b' : '#94a3b8';
@@ -247,8 +256,8 @@
         ctx.shadowOffsetY = 2;
 
         ctx.fillStyle = dark ? 'rgba(15,23,42,0.88)' : 'rgba(255,255,255,0.96)';
-        ctx.strokeStyle = isSel ? '#0f172a' : (full ? '#f43f5e' : (isHover ? col : col));
-        ctx.lineWidth = isSel ? 3.4 : (full ? 3 : 2.2);
+        ctx.strokeStyle = isSel ? selCol : (full ? '#f43f5e' : col);
+        ctx.lineWidth = isSel ? 3.4 : (full || isHover ? 3 : 2.2);
         ctx.beginPath(); ctx.roundRect(n.x - W / 2, n.y - H / 2, W, H, 8); ctx.fill(); ctx.stroke();
         ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
 
@@ -272,7 +281,7 @@
           ctx.fillStyle = over ? '#dc2626' : '#d97706';
           ctx.fillText(`📦 ${n.buffer}${queued ? ` · ⏳${n.queue}` : ''}`, n.x, n.y + 10);
         } else if (n.type === 'drop') {
-          ctx.fillStyle = queued ? '#d97706' : (dark ? '#64748b' : '#64748b');
+          ctx.fillStyle = queued ? '#d97706' : '#64748b';
           ctx.fillText(`✔ ${n.processed}${queued ? ` · ⏳${n.queue}` : ''}`, n.x, n.y + 10);
         } else if (n.type === 'charge') {
           ctx.fillStyle = full ? '#f43f5e' : '#64748b';
@@ -327,17 +336,21 @@
         ctx.fillStyle = 'rgba(255,255,255,0.85)';
         ctx.beginPath(); ctx.moveTo(13, 0); ctx.lineTo(8, 3.4); ctx.lineTo(8, -3.4); ctx.closePath(); ctx.fill();
 
+        ctx.rotate(-r.heading);
+
+        // 화물 (묶음 수량은 회전하지 않게 표시)
         if (loaded) {
           ctx.fillStyle = '#fbbf24';
           ctx.beginPath(); ctx.roundRect(-5.5, -5.5, 11, 11, 2); ctx.fill();
-          ctx.fillStyle = '#78350f';
-          ctx.font = '700 7px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-          if (r.cargo > 1) ctx.fillText(String(r.cargo), 0, 0.5);
+          if (r.cargo > 1) {
+            ctx.fillStyle = '#78350f';
+            ctx.font = '800 8px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+            ctx.fillText(String(r.cargo), 0, 0.5);
+          }
         }
 
-        ctx.rotate(-r.heading);
-
         // ID 라벨
+        ctx.textBaseline = 'alphabetic';
         if (this.show.ids && this.view.k > 0.6) {
           ctx.fillStyle = dark ? '#e2e8f0' : '#0f172a';
           ctx.font = '800 8.5px "Pretendard",sans-serif';
@@ -353,6 +366,7 @@
         ctx.fillStyle = soc <= sim.params.bat_min ? '#ef4444' : (soc >= sim.params.bat_max ? '#10b981' : '#f59e0b');
         ctx.beginPath(); ctx.roundRect(-bw / 2, -17, (bw * soc) / 100, 4, 2); ctx.fill();
 
+        ctx.textAlign = 'center';
         if (r.state === S.CHARGING) { ctx.font = '11px sans-serif'; ctx.fillText('⚡', 15, -12); }
         else if (r.state === S.FAULT) { ctx.font = '11px sans-serif'; ctx.fillText('🛠', 15, -12); }
         else if (String(r.state).startsWith('queue')) { ctx.font = '10px sans-serif'; ctx.fillText('⏳', 15, -12); }

@@ -19,6 +19,11 @@
       this.rebuild();
     }
 
+    /** 전역 '양방향 허용' 해제 시 both → a→b 일방통행으로 취급 */
+    effDir(e) {
+      return (e.dir === 'both' && this.params.bidirectional === false) ? 'ab' : e.dir;
+    }
+
     /** 레이아웃 변경 시 호출 */
     rebuild() {
       const L = this.layout;
@@ -28,7 +33,7 @@
         const a = L.node(e.a), b = L.node(e.b);
         if (!a || !b) return;
         const w = Math.hypot(a.x - b.x, a.y - b.y) / Math.max(0.1, e.speedFactor || 1);
-        const dir = this.params.bidirectional ? (e.dir === 'both' ? 'both' : e.dir) : e.dir;
+        const dir = this.effDir(e);
         if (dir === 'both' || dir === 'ab') this.adj.get(a.id).push({ to: b.id, w, edge: e });
         if (dir === 'both' || dir === 'ba') this.adj.get(b.id).push({ to: a.id, w, edge: e });
       });
@@ -55,14 +60,15 @@
 
     /**
      * 최단경로. avoidCongestion=true 면 동적 혼잡비용 반영(캐시 미사용).
+     * @param {string|null} excludedEdge edgeKey to omit during search
      * @returns {{path:string[], px:number, ok:boolean}}
      */
-    findPath(from, to, avoidCongestion = false) {
+    findPath(from, to, avoidCongestion = false, excludedEdge = null) {
       if (!from || !to) return { path: [], px: Infinity, ok: false };
       if (from === to) return { path: [from], px: 0, ok: true };
 
       const ck = from + '>' + to;
-      if (!avoidCongestion) {
+      if (!avoidCongestion && !excludedEdge) {
         const hit = this.cache.get(ck);
         if (hit) return { path: hit.path, px: hit.px, ok: hit.ok };
       }
@@ -80,6 +86,7 @@
         if (u === to) break;
         const nbrs = this.adj.get(u) || [];
         for (const nb of nbrs) {
+          if (excludedEdge && this.layout.edgeKey(u, nb.to) === excludedEdge) continue;
           if (done.has(nb.to)) continue;
           const cost = (dist.get(u) || 0) + this._edgeCost(nb.edge, nb.w, avoidCongestion);
           if (cost < (dist.has(nb.to) ? dist.get(nb.to) : Infinity)) {
@@ -100,7 +107,7 @@
         // 실제 기하 거리(혼잡 가중 제외)로 px 재계산
         res = { path, px: this.pathPixels(path), ok: true };
       }
-      if (!avoidCongestion) this.cache.set(ck, res);
+      if (!avoidCongestion && !excludedEdge) this.cache.set(ck, res);
       return res;
     }
 
@@ -188,14 +195,19 @@
       return vp / a + vp / dd;
     }
 
-    /** 경로 전체 소요시간(초) = 주행 + 회전 */
+    /** 경로 전체 소요시간(초) = 주행(구간 속도계수 반영) + 회전 */
     pathTime(path, p) {
       if (!path || path.length < 2) return 0;
       let t = 0;
       for (let i = 0; i < path.length - 1; i++) {
         const A = this.pos.get(path[i]), B = this.pos.get(path[i + 1]);
         if (!A || !B) continue;
-        t += this.travelTime(this.pxToM(Math.hypot(A.x - B.x, A.y - B.y)), p);
+        const e = this.layout.edgeBetween(path[i], path[i + 1]);
+        const sf = e ? (e.speedFactor || 1) : 1;
+        t += this.travelTime(
+          this.pxToM(Math.hypot(A.x - B.x, A.y - B.y)),
+          sf === 1 ? p : { ...p, v_max: p.v_max * sf }
+        );
       }
       t += (this.pathTurnDegrees(path) / Math.max(5, p.turn_speed));
       return t;
