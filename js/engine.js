@@ -39,6 +39,7 @@
   ]);
   const DL_WAIT = 4;    // 이 시간(초) 이상 막히면 우회·교착 검사 시작
   const DL_MAX = 45;    // 이 시간 이상 정지하면 교착으로 기록하고 재시도
+  const TURN_EPSILON = 1e-6;
 
   /* ===================== Robot ===================== */
   class Robot {
@@ -255,25 +256,48 @@
       const distPx = Math.hypot(dx, dy);
       const distM = this.g.pxToM(distPx);
 
-      // 선회 감속
+      // 주행 방향은 이동 중 변경하지 않는다. 다음 노드에서 선회해야 하는지 확인한다.
       const desired = Math.atan2(dy, dx);
       let dh = desired - this.heading;
       while (dh > Math.PI) dh -= Math.PI * 2;
       while (dh < -Math.PI) dh += Math.PI * 2;
       const turnDeg = Math.abs(dh * 180 / Math.PI);
       const maxTurn = (p.turn_speed * Math.PI / 180) * dt;
-      this.heading += clamp(dh, -maxTurn, maxTurn);
+      if (turnDeg > TURN_EPSILON * 180 / Math.PI) {
+        if (this.speed > 0.015) {
+          this.speed = Math.max(0, this.speed - p.decel * dt);
+          return false;
+        }
+        this.speed = 0;
+        this.heading = turnDeg <= maxTurn * 180 / Math.PI
+          ? desired
+          : this.heading + clamp(dh, -maxTurn, maxTurn);
+        this.consume(dt, false);
+        return false;
+      }
+      this.heading = desired;
 
       // 구간 속도 계수 (통로별 제한속도)
       const eg = (this.atNode && this.atNode !== tgt.id)
         ? this.sim.layout.edgeBetween(this.atNode, tgt.id) : null;
       const vLim = p.v_max * (eg ? (eg.speedFactor || 1) : 1);
       let vTarget = vLim;
-      if (turnDeg > p.turn_thresh) vTarget = vLim * clamp(1 - turnDeg / 180, 0.18, 1);
 
-      // 정지 거리 제약(다음 노드가 경로의 끝이면 감속 정지)
+      // 꺾이는 노드와 경로 끝에서는 정지할 수 있도록 감속한다.
       const isLast = this.path.length <= 1;
-      if (isLast) vTarget = Math.min(vTarget, Math.sqrt(Math.max(0, 2 * p.decel * distM)));
+      const next = this.path.length > 1 ? this.sim.layout.node(this.path[1]) : null;
+      const from = this.atNode ? this.sim.layout.node(this.atNode) : null;
+      let turnAtTarget = false;
+      if (next) {
+        const incoming = Math.atan2(tgt.y - (from ? from.y : this.y), tgt.x - (from ? from.x : this.x));
+        const outgoing = Math.atan2(next.y - tgt.y, next.x - tgt.x);
+        let corner = outgoing - incoming;
+        while (corner > Math.PI) corner -= Math.PI * 2;
+        while (corner < -Math.PI) corner += Math.PI * 2;
+        turnAtTarget = Math.abs(corner) > TURN_EPSILON;
+      }
+      const stopAtTarget = isLast || turnAtTarget;
+      if (stopAtTarget) vTarget = Math.min(vTarget, Math.sqrt(Math.max(0, 2 * p.decel * distM)));
 
       // 차간거리 제약 (IDM 간이형)
       let gapStop = false;
@@ -304,6 +328,7 @@
 
       if (stepM >= distM - 1e-6) {
         this.x = tgt.x; this.y = tgt.y;
+        if (stopAtTarget) this.speed = 0;
         this.lastNode = this.atNode;
         this.atNode = tgt.id;
         this.routeVisited.push(tgt.id);
@@ -315,7 +340,7 @@
         this.releaseEdge();
         if (!this.nextNode) {
           this.clearStall();
-          this.speed = Math.min(this.speed, 0.4);
+          this.speed = 0;
           return true;
         }
         return false;

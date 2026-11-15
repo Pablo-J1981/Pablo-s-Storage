@@ -14,7 +14,6 @@
     { key: 'accel',        group: 'vehicle', label: '가속도',                unit: 'm/s²', min: 0.1, max: 2.0,  step: 0.1,  def: 0.6, dec: 2 },
     { key: 'decel',        group: 'vehicle', label: '감속도',                unit: 'm/s²', min: 0.1, max: 2.5,  step: 0.1,  def: 0.8, dec: 2 },
     { key: 'turn_speed',   group: 'vehicle', label: '선회 각속도',           unit: '°/s',  min: 10,  max: 180,  step: 5,    def: 60,  dec: 0 },
-    { key: 'turn_thresh',  group: 'vehicle', label: '감속 선회 판정각',      unit: '°',    min: 5,   max: 90,   step: 5,    def: 25,  dec: 0 },
     { key: 'safety_gap',   group: 'vehicle', label: '차간 안전거리',         unit: 'm',    min: 0.3, max: 6.0,  step: 0.1,  def: 1.5, dec: 1 },
     { key: 'payload',      group: 'vehicle', label: '1회 적재 수량(Payload)', unit: 'ea',   min: 1,   max: 8,    step: 1,    def: 1,   dec: 0 },
 
