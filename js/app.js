@@ -627,6 +627,41 @@
     };
     fill($('#selFrom'), L.byType('pick'));
     fill($('#selTo'), L.byType('drop'));
+    refreshPickDropRules();
+  }
+
+  function refreshPickDropRules() {
+    const mode = app.params.destination_mode === 'mapped' ? 'mapped' : 'random';
+    const modeSelect = $('#selDestinationMode');
+    modeSelect.value = mode;
+    const box = $('#pickDropRules');
+    box.style.display = mode === 'mapped' ? '' : 'none';
+
+    const picks = app.layout.byType('pick'), drops = app.layout.byType('drop');
+    const list = $('#pickDropRuleList');
+    if (!picks.length || !drops.length) {
+      list.innerHTML = '<div class="tiny muted">픽업대와 드롭대를 각각 하나 이상 추가하세요.</div>';
+      return;
+    }
+
+    const mapping = app.params.pick_drop_map && typeof app.params.pick_drop_map === 'object'
+      ? app.params.pick_drop_map : (app.params.pick_drop_map = {});
+    list.innerHTML = picks.map((pick) => {
+      if (!drops.some((drop) => drop.id === mapping[pick.id])) mapping[pick.id] = drops[0].id;
+      return `<div class="row between tiny" style="gap:8px;margin:5px 0">
+        <b>${esc(pick.name)}</b>
+        <span style="color:var(--text-faint)">→</span>
+        <select data-pick-drop="${esc(pick.id)}" style="max-width:60%">${drops.map((drop) =>
+          `<option value="${esc(drop.id)}"${mapping[pick.id] === drop.id ? ' selected' : ''}>${esc(drop.name)}</option>`
+        ).join('')}</select>
+      </div>`;
+    }).join('');
+    $$('[data-pick-drop]', list).forEach((select) => {
+      select.addEventListener('change', () => {
+        app.params.pick_drop_map[select.dataset.pickDrop] = select.value;
+        saveState();
+      });
+    });
   }
 
   /* ================= 시나리오 ================= */
@@ -761,6 +796,11 @@
       app.sim.stationTimers = {};
       app.sim.releaseTimer = 0;
       refreshAnalytics();
+    });
+    $('#selDestinationMode').addEventListener('change', (e) => {
+      app.params.destination_mode = e.target.value;
+      refreshPickDropRules();
+      saveState();
     });
     $('#btnAdd20').addEventListener('click', () => {
       const n = app.sim.addManualJobs(20);
@@ -918,7 +958,7 @@
     $('#btnMonteCarlo').addEventListener('click', runMonteCarlo);
     $$('[data-snap]').forEach((b) => b.addEventListener('click', () => {
       app.snapshots[b.dataset.snap] = {
-        params: { ...app.params },
+        params: { ...app.params, pick_drop_map: { ...app.params.pick_drop_map } },
         layout: layoutData(),
         result: A.evaluateScenario(app.sim, {})
       };
@@ -1590,6 +1630,10 @@
         else app.params[k] = d.params[k];
       });
     }
+    if (!['random', 'mapped'].includes(app.params.destination_mode)) app.params.destination_mode = 'random';
+    if (!app.params.pick_drop_map || typeof app.params.pick_drop_map !== 'object' ||
+      Array.isArray(app.params.pick_drop_map)) app.params.pick_drop_map = {};
+    else app.params.pick_drop_map = { ...app.params.pick_drop_map };
     app.layout.fromJSON(d.layout);
     if (d.theme) { document.body.className = d.theme; $('#themeSelect').value = d.theme; }
     if (d.snapshots) app.snapshots = d.snapshots;
@@ -1598,6 +1642,7 @@
     $('#chkAutoRelease').checked = !!app.params.auto_release;
     syncAutoReleaseLabel();
     $('#selReleaseMode').value = app.params.release_mode;
+    $('#selDestinationMode').value = app.params.destination_mode;
     $('#selDispatch').value = app.params.dispatch_algo;
     $('#selTraffic').value = app.params.traffic_model;
     $('#selChargePolicy').value = app.params.charge_policy;

@@ -63,6 +63,8 @@
     p.dispatch_algo = 'hungarian';
     p.traffic_model = 'reservation';   // 'reservation' | 'softgap' | 'none'
     p.release_mode = 'total';          // 'total' | 'per_station'
+    p.destination_mode = 'random';     // 'random' | 'mapped'
+    p.pick_drop_map = {};
     p.auto_release = true;
     p.charge_policy = 'threshold';     // 'threshold' | 'opportunity'
     p.bidirectional = true;            // false 면 양방향 통로를 a→b 일방통행으로 취급

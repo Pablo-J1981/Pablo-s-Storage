@@ -750,6 +750,15 @@
       return job;
     }
 
+    destinationFor(fromNode) {
+      const drops = this.layout.byType('drop');
+      if (!drops.length) return null;
+      if (this.params.destination_mode === 'mapped') {
+        return drops.find((n) => n.id === this.params.pick_drop_map?.[fromNode.id]) || drops[0];
+      }
+      return this.rng.weighted(drops, (n) => n.priority || 1);
+    }
+
     generateDemand(dt) {
       const p = this.params;
       if (!p.auto_release) return;
@@ -764,7 +773,7 @@
         this.releaseTimer -= dt;
         if (this.releaseTimer <= 0) {
           const from = this.rng.weighted(picks, (n) => n.priority || 1) || picks[this.pickCursor++ % picks.length];
-          const to = this.rng.weighted(drops, (n) => n.priority || 1);
+          const to = from ? this.destinationFor(from) : null;
           if (from && to) this.createJob(from, to);
           this.releaseTimer += p.demand_cv > 0
             ? Math.max(0.2, this.rng.service(baseInterval, p.demand_cv))
@@ -778,7 +787,7 @@
           if (this.stationTimers[pk.id] == null) this.stationTimers[pk.id] = baseInterval;
           this.stationTimers[pk.id] -= dt;
           if (this.stationTimers[pk.id] <= 0) {
-            const to = this.rng.weighted(drops, (n) => n.priority || 1);
+            const to = this.destinationFor(pk);
             if (to) this.createJob(pk, to);
             this.stationTimers[pk.id] += p.demand_cv > 0
               ? Math.max(0.2, this.rng.service(baseInterval, p.demand_cv))
@@ -797,7 +806,7 @@
       let n = 0;
       for (let i = 0; i < count; i++) {
         const f = fromId ? this.layout.node(fromId) : this.rng.pick(picks);
-        const d = toId ? this.layout.node(toId) : this.rng.pick(drops);
+        const d = toId ? this.layout.node(toId) : (f ? this.destinationFor(f) : null);
         if (f && d) { this.createJob(f, d); n++; }
       }
       return n;
