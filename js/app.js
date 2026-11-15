@@ -1091,8 +1091,16 @@
     });
 
     bindCanvas();
+    bindPanelSplitters();
     bindKeyboard();
-    global.addEventListener('resize', () => { app.rend.resize(); });
+    global.addEventListener('resize', () => {
+      const main = $('#mainGrid');
+      if (main.dataset.panelWidthsCustomized === 'true') {
+        const widths = readPanelWidths();
+        setPanelWidths(widths.left, widths.right);
+      }
+      app.rend.resize();
+    });
   }
 
   function syncAutoReleaseLabel() {
@@ -1131,6 +1139,125 @@
     $('#' + side + 'Panel').classList.toggle('hidden', on);
     $('#float' + (side === 'left' ? 'Left' : 'Right')).classList.toggle('show', on);
     setTimeout(() => app.rend.resize(), 240);
+  }
+
+  function readPanelWidths() {
+    const styles = getComputedStyle($('#mainGrid'));
+    return {
+      left: parseFloat(styles.getPropertyValue('--left-panel-width')) || 320,
+      right: parseFloat(styles.getPropertyValue('--right-panel-width')) || 400
+    };
+  }
+
+  function setPanelWidths(left, right, priority) {
+    const main = $('#mainGrid');
+    let leftWidth = Number(left), rightWidth = Number(right);
+    if (!Number.isFinite(leftWidth)) leftWidth = 320;
+    if (!Number.isFinite(rightWidth)) rightWidth = 400;
+    leftWidth = Math.round(clamp(leftWidth, 240, 560));
+    rightWidth = Math.round(clamp(rightWidth, 280, 680));
+
+    if (global.matchMedia('(min-width: 1201px)').matches) {
+      const styles = getComputedStyle(main);
+      const innerWidth = main.clientWidth -
+        parseFloat(styles.paddingLeft) - parseFloat(styles.paddingRight);
+      const leftVisible = !main.classList.contains('left-off');
+      const rightVisible = !main.classList.contains('right-off');
+      const splitterWidth = (leftVisible ? 9 : 0) + (rightVisible ? 9 : 0);
+      let excess = Math.max(0,
+        (leftVisible ? leftWidth : 0) + (rightVisible ? rightWidth : 0) + splitterWidth + 360 - innerWidth);
+      if (priority === 'right' && leftVisible) {
+        const shrinkLeft = Math.min(excess, leftWidth - 240);
+        leftWidth -= shrinkLeft;
+        excess -= shrinkLeft;
+      }
+      if (rightVisible) {
+        const shrinkRight = Math.min(excess, rightWidth - 280);
+        rightWidth -= shrinkRight;
+        excess -= shrinkRight;
+      }
+      if (leftVisible) leftWidth = Math.max(240, leftWidth - excess);
+    }
+
+    main.style.setProperty('--left-panel-width', `${leftWidth}px`);
+    main.style.setProperty('--right-panel-width', `${rightWidth}px`);
+    main.dataset.panelWidthsCustomized = 'true';
+    $('#splitLeft').setAttribute('aria-valuenow', String(leftWidth));
+    $('#splitRight').setAttribute('aria-valuenow', String(rightWidth));
+  }
+
+  function bindPanelSplitters() {
+    const main = $('#mainGrid');
+    let resizeFrame = 0;
+    const initialWidths = readPanelWidths();
+    $('#splitLeft').setAttribute('aria-valuenow', String(initialWidths.left));
+    $('#splitRight').setAttribute('aria-valuenow', String(initialWidths.right));
+    const prepareResize = () => {
+      if (!main.classList.contains('right-wide')) return;
+      const current = readPanelWidths();
+      main.classList.remove('right-wide');
+      if (!main.classList.contains('right-off')) {
+        const wideWidth = global.matchMedia('(max-width: 1500px)').matches ? 500 : 560;
+        setPanelWidths(current.left, wideWidth);
+      }
+    };
+    const resizeCanvas = () => {
+      if (resizeFrame) return;
+      resizeFrame = requestAnimationFrame(() => {
+        resizeFrame = 0;
+        if (app.rend) app.rend.resize();
+      });
+    };
+
+    [['left', $('#splitLeft')], ['right', $('#splitRight')]].forEach(([side, handle]) => {
+      handle.addEventListener('pointerdown', (ev) => {
+        if (ev.button !== 0 || !global.matchMedia('(min-width: 1201px)').matches) return;
+        ev.preventDefault();
+        prepareResize();
+        const startWidths = readPanelWidths();
+        const startX = ev.clientX;
+        main.classList.add('is-resizing');
+        handle.setPointerCapture(ev.pointerId);
+
+        const onMove = (moveEv) => {
+          const delta = moveEv.clientX - startX;
+          setPanelWidths(
+            side === 'left' ? startWidths.left + delta : startWidths.left,
+            side === 'right' ? startWidths.right - delta : startWidths.right,
+            side
+          );
+          resizeCanvas();
+        };
+        const finish = () => {
+          handle.removeEventListener('pointermove', onMove);
+          handle.removeEventListener('pointerup', finish);
+          handle.removeEventListener('pointercancel', finish);
+          if (handle.hasPointerCapture(ev.pointerId)) handle.releasePointerCapture(ev.pointerId);
+          main.classList.remove('is-resizing');
+          saveState();
+          resizeCanvas();
+        };
+        handle.addEventListener('pointermove', onMove);
+        handle.addEventListener('pointerup', finish);
+        handle.addEventListener('pointercancel', finish);
+      });
+
+      handle.addEventListener('keydown', (ev) => {
+        if (ev.key !== 'ArrowLeft' && ev.key !== 'ArrowRight') return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        prepareResize();
+        const widths = readPanelWidths();
+        const delta = ev.key === 'ArrowRight' ? 16 : -16;
+        setPanelWidths(
+          side === 'left' ? widths.left + delta : widths.left,
+          side === 'right' ? widths.right - delta : widths.right,
+          side
+        );
+        saveState();
+        resizeCanvas();
+      });
+    });
   }
 
   /* ================= 캔버스 상호작용 ================= */
@@ -1760,7 +1887,8 @@
         params: app.params,
         layout: layoutData(),
         theme: document.body.className,
-        snapshots: app.snapshots
+        snapshots: app.snapshots,
+        panelWidths: $('#mainGrid').dataset.panelWidthsCustomized === 'true' ? readPanelWidths() : null
       }));
     } catch (e) { /* 용량 초과 시 무시 */ }
   }
@@ -1793,6 +1921,7 @@
       Array.isArray(app.params.pick_drop_map)) app.params.pick_drop_map = {};
     else app.params.pick_drop_map = clonePickDropMap(app.params.pick_drop_map);
     app.layout.fromJSON(d.layout);
+    if (d.panelWidths) setPanelWidths(d.panelWidths.left, d.panelWidths.right);
     if (d.theme) { document.body.className = d.theme; $('#themeSelect').value = d.theme; }
     if (d.snapshots) app.snapshots = d.snapshots;
 
