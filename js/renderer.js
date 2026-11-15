@@ -25,6 +25,9 @@
       this.hoverEdge = null;
       this.selected = null;       // 선택된 노드
       this.selectedEdge = null;   // 선택된 통로
+      this.selectedNodes = new Set();
+      this.selectedEdges = new Set();
+      this.selectBox = null;
       this.edgeStart = null;
       this.ghost = null;
       this.mouseWorld = null;
@@ -91,6 +94,39 @@
       return null;
     }
 
+    selectionInRect(rect) {
+      const { x0, y0, x1, y1 } = rect;
+      const nodeIds = new Set();
+      const edges = new Set();
+      this.sim.layout.nodes.forEach((n) => {
+        const hw = n.type === 'waypoint' ? 12 : 32;
+        const hh = n.type === 'waypoint' ? 12 : 22;
+        if (n.x + hw >= x0 && n.x - hw <= x1 && n.y + hh >= y0 && n.y - hh <= y1) {
+          nodeIds.add(n.id);
+        }
+      });
+      this.sim.layout.edges.forEach((e) => {
+        const a = this.sim.layout.node(e.a), b = this.sim.layout.node(e.b);
+        if (!a || !b) return;
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const p = [-dx, dx, -dy, dy];
+        const q = [a.x - x0, x1 - a.x, a.y - y0, y1 - a.y];
+        let t0 = 0, t1 = 1;
+        for (let i = 0; i < 4; i++) {
+          if (p[i] === 0) {
+            if (q[i] < 0) return;
+          } else {
+            const t = q[i] / p[i];
+            if (p[i] < 0) t0 = Math.max(t0, t);
+            else t1 = Math.min(t1, t);
+            if (t0 > t1) return;
+          }
+        }
+        edges.add(e);
+      });
+      return { nodeIds, edges };
+    }
+
     css(name, fb) {
       const v = getComputedStyle(document.body).getPropertyValue(name);
       return (v && v.trim()) || fb;
@@ -119,6 +155,7 @@
       if (this.ghost) this.drawGhost();
 
       ctx.restore();
+      if (this.selectBox && this.selectBox.moved) this.drawSelectionBox();
       this.drawScaleBar(dark);
       this.drawLegend(dark);
       ctx.restore();
@@ -158,7 +195,7 @@
         const occ = sim.edgeOccupancy.get(key);
         const busy = occ ? occ.size : 0;
         const isHover = this.hoverEdge === e;
-        const isSel = this.selectedEdge === e;
+        const isSel = this.selectedEdge === e || this.selectedEdges.has(e);
         const dir = g.effDir(e);   // 전역 '양방향 허용' 해제 반영
 
         ctx.save();
@@ -228,7 +265,7 @@
       const selCol = dark ? '#38bdf8' : '#0f172a';
       sim.layout.nodes.forEach((n) => {
         const isHover = this.hover === n;
-        const isSel = this.selected === n || this.edgeStart === n;
+        const isSel = this.selected === n || this.selectedNodes.has(n.id) || this.edgeStart === n;
         const col = PALETTE[n.type] || '#94a3b8';
         ctx.save();
 
@@ -382,6 +419,20 @@
       ctx.fillStyle = PALETTE[g.type] || '#94a3b8';
       if (g.type === 'waypoint') { ctx.beginPath(); ctx.arc(g.x, g.y, 5, 0, Math.PI * 2); ctx.fill(); }
       else { ctx.beginPath(); ctx.roundRect(g.x - 28, g.y - 19, 56, 38, 8); ctx.fill(); }
+      ctx.restore();
+    }
+
+    drawSelectionBox() {
+      const ctx = this.ctx, box = this.selectBox;
+      const x = Math.min(box.x1, box.x2), y = Math.min(box.y1, box.y2);
+      const w = Math.abs(box.x2 - box.x1), h = Math.abs(box.y2 - box.y1);
+      ctx.save();
+      ctx.fillStyle = 'rgba(14,165,233,0.12)';
+      ctx.strokeStyle = '#0ea5e9';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([5, 3]);
+      ctx.fillRect(x, y, w, h);
+      ctx.strokeRect(x, y, w, h);
       ctx.restore();
     }
 

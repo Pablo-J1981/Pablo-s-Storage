@@ -23,7 +23,7 @@
     view3D: false, view3DLoading: false,
     running: true, speed: 120, tool: 'select',
     lastFrame: 0, uiTick: 0, slowTick: 0,
-    drag: null, dragFrom: null, panning: false, panStart: null,
+    drag: null, dragFrom: null, selectBox: null, panning: false, panStart: null,
     snap: true,
     snapshots: {},
     sweepRows: null, sweepSpec: null,
@@ -1359,6 +1359,7 @@
       if (e.button !== 0) return;
 
       const hit = app.rend.nodeAt(wp);
+      const edgeHit = !hit && app.rend.edgeAt(wp, 10);
 
       switch (app.tool) {
         case 'select':
@@ -1367,8 +1368,23 @@
             app.dragFrom = { x: hit.x, y: hit.y, sx, sy, moved: false, snap: snapshotLayout() };
             showInspector(hit);
           } else {
-            const ed = app.rend.edgeAt(wp, 10);
-            if (ed) showEdgeInspector(ed); else closeInspector();
+            if (edgeHit) {
+              showEdgeInspector(edgeHit);
+            } else {
+              const baseNodes = new Set(app.rend.selectedNodes);
+              const baseEdges = new Set(app.rend.selectedEdges);
+              if (!e.shiftKey) closeInspector();
+              else {
+                $('#inspector').classList.remove('show');
+                app.rend.selected = null;
+                app.rend.selectedEdge = null;
+              }
+              app.selectBox = {
+                x1: sx, y1: sy, x2: sx, y2: sy, moved: false, additive: e.shiftKey,
+                baseNodes, baseEdges
+              };
+              app.rend.selectBox = app.selectBox;
+            }
           }
           break;
 
@@ -1435,6 +1451,24 @@
       const wp = app.rend.toWorld(sx, sy);
       app.rend.mouseWorld = wp;
 
+      if (app.selectBox) {
+        const box = app.selectBox;
+        box.x2 = sx; box.y2 = sy;
+        if (!box.moved && Math.hypot(sx - box.x1, sy - box.y1) >= 4) box.moved = true;
+        if (box.moved) {
+          const a = app.rend.toWorld(box.x1, box.y1), b = app.rend.toWorld(box.x2, box.y2);
+          const found = app.rend.selectionInRect({
+            x0: Math.min(a.x, b.x), y0: Math.min(a.y, b.y),
+            x1: Math.max(a.x, b.x), y1: Math.max(a.y, b.y)
+          });
+          app.rend.selectedNodes = new Set(box.additive ? box.baseNodes : []);
+          app.rend.selectedEdges = new Set(box.additive ? box.baseEdges : []);
+          found.nodeIds.forEach((id) => app.rend.selectedNodes.add(id));
+          found.edges.forEach((edge) => app.rend.selectedEdges.add(edge));
+        }
+        return;
+      }
+
       if (app.drag && app.tool === 'select') {
         const f = app.dragFrom;
         // 단순 클릭의 미세한 떨림으로 노드가 격자에 튀지 않도록 4px 이상 움직였을 때만 이동
@@ -1464,6 +1498,13 @@
       if (app.panning) {
         app.panning = false;
         $('#simCanvas').style.cursor = cursorFor(app.tool);
+      }
+      if (app.selectBox) {
+        const moved = app.selectBox.moved;
+        app.selectBox = null;
+        app.rend.selectBox = null;
+        if (moved && (app.rend.selectedNodes.size || app.rend.selectedEdges.size)) showMultiInspector();
+        else if (!moved && !app.rend.selectedNodes.size && !app.rend.selectedEdges.size) closeInspector();
       }
       if (app.drag) {
         const d = app.drag, f = app.dragFrom;
@@ -1515,35 +1556,46 @@
   }
 
   function deleteNode(n) {
+    deleteTargets([n], []);
+  }
+
+  function deleteTargets(nodes, edges) {
+    const nodeIds = new Set(nodes.map((n) => n.id));
+    const edgeTargets = new Set(edges);
+    if (!nodeIds.size && !edgeTargets.size) return;
     pushHistory();
-    const safe = app.layout.nodes.find((x) => x !== n);
+    const safe = app.layout.nodes.find((x) => !nodeIds.has(x.id));
     app.sim.robots.forEach((r) => {
-      const touches = r.atNode === n.id || r.nextNode === n.id || r.path.includes(n.id)
-        || (r.job && (r.job.from === n.id || r.job.to === n.id));
+      const touches = nodeIds.has(r.atNode) || nodeIds.has(r.nextNode)
+        || r.path.some((id) => nodeIds.has(id))
+        || (r.job && (nodeIds.has(r.job.from) || nodeIds.has(r.job.to)));
       if (!touches) return;
       r.abortJob();
-      if (r.atNode === n.id && safe) { r.atNode = safe.id; r.x = safe.x; r.y = safe.y; }
+      if (nodeIds.has(r.atNode) && safe) { r.atNode = safe.id; r.x = safe.x; r.y = safe.y; }
     });
-    app.sim.jobs = app.sim.jobs.filter((j) => j.status === 'done' || (j.from !== n.id && j.to !== n.id));
-    app.layout.removeNode(n.id);
-    if (app.rend.edgeStart === n) app.rend.edgeStart = null;
-    if (app.rend.hover === n) app.rend.hover = null;
-    if (app.rend.selected === n || app.rend.selectedEdge) closeInspector();
+    app.sim.jobs = app.sim.jobs.filter((j) => j.status === 'done' || (!nodeIds.has(j.from) && !nodeIds.has(j.to)));
+    if (edgeTargets.size) app.layout.edges = app.layout.edges.filter((edge) => !edgeTargets.has(edge));
+    nodes.forEach((n) => app.layout.removeNode(n.id));
+    if (nodeIds.has(app.rend.edgeStart && app.rend.edgeStart.id)) app.rend.edgeStart = null;
+    if (nodes.includes(app.rend.hover)) app.rend.hover = null;
+    app.rend.hoverEdge = null;
+    const nodeCount = nodeIds.size, edgeCount = edgeTargets.size;
+    closeInspector();
     afterLayoutChange();
-    toast(`🗑 <b>${n.id}</b> 삭제`);
+    const parts = [];
+    if (nodeCount) parts.push(`노드 ${nodeCount}개`);
+    if (edgeCount) parts.push(`통로 ${edgeCount}개`);
+    toast(`🗑 ${parts.join(' · ')} 삭제`);
   }
 
   /** 인스펙터에 열려 있는 노드 또는 통로 삭제 */
   function deleteSelection() {
-    const n = app.rend.selected, e = app.rend.selectedEdge;
-    if (n) deleteNode(n);
-    else if (e) {
-      pushHistory();
-      app.layout.removeEdge(e);
-      afterLayoutChange();
-      toast('통로를 삭제했습니다.');
-    }
-    closeInspector();
+    const nodeIds = new Set(app.rend.selectedNodes);
+    const edges = new Set(app.rend.selectedEdges);
+    if (app.rend.selected) nodeIds.add(app.rend.selected.id);
+    if (app.rend.selectedEdge) edges.add(app.rend.selectedEdge);
+    const nodes = app.layout.nodes.filter((n) => nodeIds.has(n.id));
+    deleteTargets(nodes, Array.from(edges));
   }
 
   function autoLink() {
@@ -1577,6 +1629,7 @@
   function showInspector(n) {
     const sim = app.sim;
     app.rend.selected = n; app.rend.selectedEdge = null;
+    app.rend.selectedNodes = new Set([n.id]); app.rend.selectedEdges.clear();
     $('#inspector').classList.add('show');
     $('#inspTitle').textContent = `${M.NODE_TYPES[n.type].label} · ${n.id}`;
     const deg = (sim.graph.adj.get(n.id) || []).length;
@@ -1624,6 +1677,7 @@
     const L = app.layout, a = L.node(e.a), b = L.node(e.b);
     if (!a || !b) return;
     app.rend.selected = null; app.rend.selectedEdge = e;
+    app.rend.selectedNodes.clear(); app.rend.selectedEdges = new Set([e]);
     $('#inspector').classList.add('show');
     $('#inspTitle').textContent = `통로 · ${e.a} ↔ ${e.b}`;
     const m = app.sim.graph.pxToM(Math.hypot(a.x - b.x, a.y - b.y));
@@ -1641,9 +1695,21 @@
         <input type="number" data-insp="speedFactor" min="0.2" max="1" step="0.1" value="${e.speedFactor || 1}"></div>`;
   }
 
+  function showMultiInspector() {
+    app.rend.selected = null; app.rend.selectedEdge = null;
+    const nodes = app.rend.selectedNodes.size, edges = app.rend.selectedEdges.size;
+    $('#inspector').classList.add('show');
+    $('#inspTitle').textContent = '다중 선택';
+    $('#inspBody').innerHTML = `
+      <div class="insp-row"><span>선택한 노드</span><b>${nodes}개</b></div>
+      <div class="insp-row"><span>선택한 통로</span><b>${edges}개</b></div>
+      <div class="tiny muted">Delete 키 또는 아래 삭제 버튼으로 한 번에 삭제할 수 있습니다.</div>`;
+  }
+
   function closeInspector() {
     $('#inspector').classList.remove('show');
     app.rend.selected = null; app.rend.selectedEdge = null;
+    app.rend.selectedNodes.clear(); app.rend.selectedEdges.clear();
   }
 
   /* ================= 키보드 ================= */
@@ -1672,7 +1738,8 @@
         app.rend.edgeStart = null; closeInspector();
         return;
       }
-      if ((e.key === 'Delete' || e.key === 'Backspace') && (app.rend.selected || app.rend.selectedEdge)) {
+      if ((e.key === 'Delete' || e.key === 'Backspace')
+        && (app.rend.selectedNodes.size || app.rend.selectedEdges.size || app.rend.selected || app.rend.selectedEdge)) {
         e.preventDefault(); deleteSelection(); return;
       }
       const speeds = { '1': 1, '2': 4, '3': 10, '4': 30, '5': 120 };
