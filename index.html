@@ -26,7 +26,7 @@
       <div class="brand-mark" aria-hidden="true">🤖</div>
       <div class="brand-text">
         <div class="brand-title">
-          AGV/AMR 시뮬레이터 by Pablo.J
+          AGV Simulator by Pablo.J
           <span class="brand-badge">ver.2026-01</span>
         </div>
         <div class="brand-sub">물리 주행 · 교통 혼잡 · 큐잉 이론 · 몬테카를로 기반 시뮬레이터</div>
@@ -51,10 +51,14 @@
   </header>
 
   <!-- ══════════════ MAIN ══════════════ -->
-  <div class="main" id="mainGrid">
+  <div class="main settings-mode" id="mainGrid">
 
-    <!-- ───────── LEFT: 설계 파라미터 ───────── -->
-    <section class="panel" id="leftPanel" aria-label="설계 파라미터">
+    <!-- ───────── RIGHT: 변수 설정 ───────── -->
+    <section class="panel" id="leftPanel" aria-label="변수 설정">
+      <div class="side-mode-switch" role="group" aria-label="우측 패널 화면 선택">
+        <button class="btn sm active" data-side-view="settings" aria-pressed="true">⚙ 변수 설정</button>
+        <button class="btn sm" data-side-view="analysis" aria-pressed="false">📊 분석</button>
+      </div>
       <nav class="tabs" role="tablist">
         <button class="tab active" data-pane="p-demand">📦 수요</button>
         <button class="tab" data-pane="p-vehicle">🚗 차량</button>
@@ -62,8 +66,8 @@
         <button class="tab" data-pane="p-traffic">🧠 배차·교통</button>
         <button class="tab" data-pane="p-cost">💰 비용</button>
         <div style="display:flex;align-items:center;gap:3px;padding:0 5px;margin-left:auto">
-          <button class="btn xs" id="btnCollapseLeft" title="설계 패널 접기"
-            aria-label="설계 파라미터 접기" aria-controls="leftPanel" aria-expanded="true">⇤</button>
+          <button class="btn xs" id="btnCollapseSettings" title="변수 설정 패널 접기"
+            aria-label="변수 설정 패널 접기" aria-controls="leftPanel rightPanel" aria-expanded="true">⇥</button>
         </div>
       </nav>
 
@@ -284,11 +288,7 @@
       </div>
     </section>
 
-    <div class="layout-splitter" id="splitLeft" role="separator" aria-orientation="vertical"
-      aria-label="설계 패널 폭 조절" aria-valuemin="240" aria-valuemax="560" tabindex="0"
-      title="드래그 또는 방향키로 설계 패널 폭 조절"></div>
-
-    <!-- ───────── CENTER: 맵 & 시뮬레이션 ───────── -->
+    <!-- ───────── LEFT: 맵 & 시뮬레이션 ───────── -->
     <section class="panel sim-panel" aria-label="시뮬레이션 맵">
 
       <div class="toolbar">
@@ -361,9 +361,8 @@
           </div>
         </div>
 
-        <button class="float-btn" id="floatLeft" aria-label="설계 파라미터 펼치기"
-          aria-controls="leftPanel" aria-expanded="true">▶ 파라미터</button>
-        <button class="float-btn" id="floatRight">◀ 분석</button>
+        <button class="float-btn" id="floatRight" aria-label="우측 패널 펼치기"
+          aria-controls="leftPanel rightPanel" aria-expanded="true">◀ 패널 펼치기</button>
       </div>
 
       <div class="statusbar">
@@ -379,11 +378,15 @@
     </section>
 
     <div class="layout-splitter" id="splitRight" role="separator" aria-orientation="vertical"
-      aria-label="분석 패널 폭 조절" aria-valuemin="280" aria-valuemax="680" tabindex="0"
-      title="드래그 또는 방향키로 분석 패널 폭 조절"></div>
+      aria-label="우측 패널 폭 조절" aria-valuemin="280" aria-valuemax="680" tabindex="0"
+      title="드래그 또는 방향키로 우측 패널 폭 조절"></div>
 
-    <!-- ───────── RIGHT: 분석 ───────── -->
+    <!-- ───────── RIGHT: 분석 대시보드 ───────── -->
     <section class="panel" id="rightPanel" aria-label="분석 대시보드">
+      <div class="side-mode-switch" role="group" aria-label="우측 패널 화면 선택">
+        <button class="btn sm" data-side-view="settings" aria-pressed="false">⚙ 변수 설정</button>
+        <button class="btn sm active" data-side-view="analysis" aria-pressed="true">📊 분석</button>
+      </div>
       <nav class="tabs" role="tablist">
         <button class="tab active" data-pane="r-overview">📊 총괄</button>
         <button class="tab" data-pane="r-matrix">📏 거리</button>
@@ -394,7 +397,8 @@
         <div style="display:flex;align-items:center;gap:3px;padding:0 5px;margin-left:auto">
           <button class="btn xs" id="btnWide" title="패널 넓게">↔</button>
           <button class="btn xs" id="btnStudio" title="전체화면 스튜디오">⛶</button>
-          <button class="btn xs" id="btnCollapseRight" title="접기">⇥</button>
+          <button class="btn xs" id="btnCollapseRight" title="우측 패널 접기"
+            aria-label="분석 패널 접기" aria-controls="leftPanel rightPanel" aria-expanded="true">⇥</button>
         </div>
       </nav>
 

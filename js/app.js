@@ -973,10 +973,12 @@
       $('#mainGrid').classList.toggle('right-wide');
       setTimeout(() => app.rend.resize(), 240);
     });
-    $('#btnCollapseLeft').addEventListener('click', () => toggleSide('left'));
-    $('#btnCollapseRight').addEventListener('click', () => toggleSide('right'));
-    $('#floatRight').addEventListener('click', () => toggleSide('right'));
-    $('#floatLeft').addEventListener('click', () => toggleSide('left'));
+    $('#btnCollapseSettings').addEventListener('click', toggleSide);
+    $('#btnCollapseRight').addEventListener('click', toggleSide);
+    $('#floatRight').addEventListener('click', toggleSide);
+    $$('[data-side-view]').forEach((button) => button.addEventListener('click', () => {
+      setPanelView(button.dataset.sideView);
+    }));
 
     /* --- CSV --- */
     $('#btnMatrixCsv').addEventListener('click', exportMatrixCsv);
@@ -1097,8 +1099,7 @@
     global.addEventListener('resize', () => {
       const main = $('#mainGrid');
       if (main.dataset.panelWidthsCustomized === 'true') {
-        const widths = readPanelWidths();
-        setPanelWidths(widths.left, widths.right);
+        setPanelWidth(readPanelWidth());
       }
       app.rend.resize();
     });
@@ -1132,80 +1133,81 @@
     $('#simCanvas').style.cursor = cursorFor(t);
   }
 
-  function toggleSide(side) {
+  function toggleSide() {
     const g = $('#mainGrid');
-    const cls = side + '-off';
-    g.classList.toggle(cls);
-    const on = g.classList.contains(cls);
-    $('#' + side + 'Panel').classList.toggle('hidden', on);
-    $('#float' + (side === 'left' ? 'Left' : 'Right')).classList.toggle('show', on);
-    if (side === 'left') {
-      const expanded = String(!on);
-      $('#btnCollapseLeft').setAttribute('aria-expanded', expanded);
-      $('#btnCollapseLeft').setAttribute('aria-label', `설계 파라미터 ${on ? '펼치기' : '접기'}`);
-      $('#floatLeft').setAttribute('aria-expanded', expanded);
-    }
+    g.classList.toggle('right-off');
+    const collapsed = g.classList.contains('right-off');
+    const settingsActive = g.classList.contains('settings-mode');
+    $('#leftPanel').classList.toggle('hidden', collapsed || !settingsActive);
+    $('#rightPanel').classList.toggle('hidden', collapsed || settingsActive);
+    $('#floatRight').classList.toggle('show', collapsed);
+    const expanded = String(!collapsed);
+    ['#btnCollapseSettings', '#btnCollapseRight', '#floatRight'].forEach((selector) => {
+      $(selector).setAttribute('aria-expanded', expanded);
+    });
+    const activeLabel = settingsActive ? '변수 설정' : '분석';
+    const actionLabel = collapsed ? '펼치기' : '접기';
+    $('#btnCollapseSettings').setAttribute('aria-label', `${activeLabel} 패널 ${actionLabel}`);
+    $('#btnCollapseRight').setAttribute('aria-label', `${activeLabel} 패널 ${actionLabel}`);
+    $('#floatRight').setAttribute('aria-label', `우측 ${activeLabel} 패널 ${actionLabel}`);
     setTimeout(() => app.rend.resize(), 240);
   }
 
-  function readPanelWidths() {
-    const styles = getComputedStyle($('#mainGrid'));
-    return {
-      left: parseFloat(styles.getPropertyValue('--left-panel-width')) || 320,
-      right: parseFloat(styles.getPropertyValue('--right-panel-width')) || 400
-    };
+  function setPanelView(view) {
+    const settingsActive = view === 'settings';
+    const main = $('#mainGrid');
+    main.classList.toggle('settings-mode', settingsActive);
+    const collapsed = main.classList.contains('right-off');
+    $('#leftPanel').classList.toggle('hidden', collapsed || !settingsActive);
+    $('#rightPanel').classList.toggle('hidden', collapsed || settingsActive);
+    $$('[data-side-view]').forEach((button) => {
+      const active = button.dataset.sideView === view;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-pressed', String(active));
+    });
+    const activeLabel = settingsActive ? '변수 설정' : '분석';
+    const actionLabel = collapsed ? '펼치기' : '접기';
+    $('#btnCollapseSettings').setAttribute('aria-label', `${activeLabel} 패널 ${actionLabel}`);
+    $('#btnCollapseRight').setAttribute('aria-label', `${activeLabel} 패널 ${actionLabel}`);
+    $('#floatRight').setAttribute('aria-label', `우측 ${activeLabel} 패널 ${actionLabel}`);
+    setTimeout(() => app.rend.resize(), 240);
   }
 
-  function setPanelWidths(left, right, priority) {
+  function readPanelWidth() {
+    return parseFloat(getComputedStyle($('#mainGrid')).getPropertyValue('--right-panel-width')) || 400;
+  }
+
+  function setPanelWidth(width) {
     const main = $('#mainGrid');
-    let leftWidth = Number(left), rightWidth = Number(right);
-    if (!Number.isFinite(leftWidth)) leftWidth = 320;
+    let rightWidth = Number(width);
     if (!Number.isFinite(rightWidth)) rightWidth = 400;
-    leftWidth = Math.round(clamp(leftWidth, 240, 560));
-    rightWidth = Math.round(clamp(rightWidth, 280, 680));
 
     if (global.matchMedia('(min-width: 1201px)').matches) {
       const styles = getComputedStyle(main);
       const innerWidth = main.clientWidth -
         parseFloat(styles.paddingLeft) - parseFloat(styles.paddingRight);
-      const leftVisible = !main.classList.contains('left-off');
-      const rightVisible = !main.classList.contains('right-off');
-      const splitterWidth = (leftVisible ? 9 : 0) + (rightVisible ? 9 : 0);
-      let excess = Math.max(0,
-        (leftVisible ? leftWidth : 0) + (rightVisible ? rightWidth : 0) + splitterWidth + 360 - innerWidth);
-      if (priority === 'right' && leftVisible) {
-        const shrinkLeft = Math.min(excess, leftWidth - 240);
-        leftWidth -= shrinkLeft;
-        excess -= shrinkLeft;
-      }
-      if (rightVisible) {
-        const shrinkRight = Math.min(excess, rightWidth - 280);
-        rightWidth -= shrinkRight;
-        excess -= shrinkRight;
-      }
-      if (leftVisible) leftWidth = Math.max(240, leftWidth - excess);
+      const maxWidth = Math.max(280, Math.min(680, innerWidth - 369));
+      rightWidth = clamp(rightWidth, 280, maxWidth);
     }
 
-    main.style.setProperty('--left-panel-width', `${leftWidth}px`);
+    rightWidth = Math.round(clamp(rightWidth, 280, 680));
     main.style.setProperty('--right-panel-width', `${rightWidth}px`);
     main.dataset.panelWidthsCustomized = 'true';
-    $('#splitLeft').setAttribute('aria-valuenow', String(leftWidth));
     $('#splitRight').setAttribute('aria-valuenow', String(rightWidth));
   }
 
   function bindPanelSplitters() {
     const main = $('#mainGrid');
     let resizeFrame = 0;
-    const initialWidths = readPanelWidths();
-    $('#splitLeft').setAttribute('aria-valuenow', String(initialWidths.left));
-    $('#splitRight').setAttribute('aria-valuenow', String(initialWidths.right));
+    const initialWidth = readPanelWidth();
+    $('#splitRight').setAttribute('aria-valuenow', String(initialWidth));
     const prepareResize = () => {
       if (!main.classList.contains('right-wide')) return;
-      const current = readPanelWidths();
+      const current = readPanelWidth();
       main.classList.remove('right-wide');
       if (!main.classList.contains('right-off')) {
         const wideWidth = global.matchMedia('(max-width: 1500px)').matches ? 500 : 560;
-        setPanelWidths(current.left, wideWidth);
+        setPanelWidth(wideWidth);
       }
     };
     const resizeCanvas = () => {
@@ -1216,54 +1218,42 @@
       });
     };
 
-    [['left', $('#splitLeft')], ['right', $('#splitRight')]].forEach(([side, handle]) => {
-      handle.addEventListener('pointerdown', (ev) => {
-        if (ev.button !== 0 || !global.matchMedia('(min-width: 1201px)').matches) return;
-        ev.preventDefault();
-        prepareResize();
-        const startWidths = readPanelWidths();
-        const startX = ev.clientX;
-        main.classList.add('is-resizing');
-        handle.setPointerCapture(ev.pointerId);
+    const handle = $('#splitRight');
+    handle.addEventListener('pointerdown', (ev) => {
+      if (ev.button !== 0 || !global.matchMedia('(min-width: 1201px)').matches) return;
+      ev.preventDefault();
+      prepareResize();
+      const startWidth = readPanelWidth();
+      const startX = ev.clientX;
+      main.classList.add('is-resizing');
+      handle.setPointerCapture(ev.pointerId);
 
-        const onMove = (moveEv) => {
-          const delta = moveEv.clientX - startX;
-          setPanelWidths(
-            side === 'left' ? startWidths.left + delta : startWidths.left,
-            side === 'right' ? startWidths.right - delta : startWidths.right,
-            side
-          );
-          resizeCanvas();
-        };
-        const finish = () => {
-          handle.removeEventListener('pointermove', onMove);
-          handle.removeEventListener('pointerup', finish);
-          handle.removeEventListener('pointercancel', finish);
-          if (handle.hasPointerCapture(ev.pointerId)) handle.releasePointerCapture(ev.pointerId);
-          main.classList.remove('is-resizing');
-          saveState();
-          resizeCanvas();
-        };
-        handle.addEventListener('pointermove', onMove);
-        handle.addEventListener('pointerup', finish);
-        handle.addEventListener('pointercancel', finish);
-      });
-
-      handle.addEventListener('keydown', (ev) => {
-        if (ev.key !== 'ArrowLeft' && ev.key !== 'ArrowRight') return;
-        ev.preventDefault();
-        ev.stopPropagation();
-        prepareResize();
-        const widths = readPanelWidths();
-        const delta = ev.key === 'ArrowRight' ? 16 : -16;
-        setPanelWidths(
-          side === 'left' ? widths.left + delta : widths.left,
-          side === 'right' ? widths.right - delta : widths.right,
-          side
-        );
+      const onMove = (moveEv) => {
+        setPanelWidth(startWidth - (moveEv.clientX - startX));
+        resizeCanvas();
+      };
+      const finish = () => {
+        handle.removeEventListener('pointermove', onMove);
+        handle.removeEventListener('pointerup', finish);
+        handle.removeEventListener('pointercancel', finish);
+        if (handle.hasPointerCapture(ev.pointerId)) handle.releasePointerCapture(ev.pointerId);
+        main.classList.remove('is-resizing');
         saveState();
         resizeCanvas();
-      });
+      };
+      handle.addEventListener('pointermove', onMove);
+      handle.addEventListener('pointerup', finish);
+      handle.addEventListener('pointercancel', finish);
+    });
+
+    handle.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'ArrowLeft' && ev.key !== 'ArrowRight') return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      prepareResize();
+      setPanelWidth(readPanelWidth() + (ev.key === 'ArrowLeft' ? 16 : -16));
+      saveState();
+      resizeCanvas();
     });
   }
 
@@ -1611,8 +1601,8 @@
       const tools = { v: 'select', h: 'pan', p: 'pick', d: 'drop', c: 'charge', k: 'park', n: 'waypoint', e: 'edge', x: 'delete' };
       if (tools[k]) { setTool(tools[k]); return; }
       if (k === 'f') { app.rend.fitToContent(); return; }
-      if (e.key === '[') { toggleSide('left'); return; }
-      if (e.key === ']') { toggleSide('right'); return; }
+      if (e.key === '[') { setPanelView('settings'); return; }
+      if (e.key === ']') { toggleSide(); return; }
     });
   }
 
@@ -1895,7 +1885,8 @@
         layout: layoutData(),
         theme: document.body.className,
         snapshots: app.snapshots,
-        panelWidths: $('#mainGrid').dataset.panelWidthsCustomized === 'true' ? readPanelWidths() : null
+        panelWidths: $('#mainGrid').dataset.panelWidthsCustomized === 'true'
+          ? { right: readPanelWidth() } : null
       }));
     } catch (e) { /* 용량 초과 시 무시 */ }
   }
@@ -1928,7 +1919,7 @@
       Array.isArray(app.params.pick_drop_map)) app.params.pick_drop_map = {};
     else app.params.pick_drop_map = clonePickDropMap(app.params.pick_drop_map);
     app.layout.fromJSON(d.layout);
-    if (d.panelWidths) setPanelWidths(d.panelWidths.left, d.panelWidths.right);
+    if (d.panelWidths) setPanelWidth(d.panelWidths.right);
     if (d.theme) { document.body.className = d.theme; $('#themeSelect').value = d.theme; }
     if (d.snapshots) app.snapshots = d.snapshots;
 
