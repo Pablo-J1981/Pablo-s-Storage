@@ -103,27 +103,43 @@
   }
 
   function pendingJobs(sim) {
-    // Reservation-mode admission control prevents station queues from gridlocking narrow aisles.
-    const cap = sim.params.traffic_model === 'reservation' ? 1 : Math.max(1, sim.params.port_cap);
+    const throughputMode = sim.params.dispatch_port_policy === 'throughput';
+    const reservationTraffic = sim.params.traffic_model === 'reservation';
+    const cap = Math.max(1, sim.params.port_cap);
+    const pickCap = reservationTraffic
+      ? Math.max(1, sim.params.reservation_pick_limit || cap)
+      : cap;
+    const dropCap = throughputMode && reservationTraffic ? 2 : cap;
     const fromSlots = new Map();
     const toSlots = new Map();
     for (const r of sim.robots) {
       if (!r.job || r.job.status === 'pending' || r.job.status === 'done') continue;
-      fromSlots.set(r.job.from, (fromSlots.get(r.job.from) || 0) + 1);
-      toSlots.set(r.job.to, (toSlots.get(r.job.to) || 0) + 1);
+      if (!throughputMode || [AMR.STATE.TO_PICK, AMR.STATE.QUEUE_PICK, AMR.STATE.LOADING].includes(r.state)) {
+        fromSlots.set(r.job.from, (fromSlots.get(r.job.from) || 0) + 1);
+      }
+      if (!throughputMode || reservationTraffic ||
+        [AMR.STATE.QUEUE_DROP, AMR.STATE.UNLOADING].includes(r.state)) {
+        toSlots.set(r.job.to, (toSlots.get(r.job.to) || 0) + 1);
+      }
     }
 
     const available = [];
     for (const job of sim.jobs) {
       if (job.status !== 'pending' || !sim.graph.findPath(job.from, job.to).ok) continue;
-      const fromFree = cap - (fromSlots.get(job.from) || 0);
-      const toFree = cap - (toSlots.get(job.to) || 0);
+      const fromFree = pickCap - (fromSlots.get(job.from) || 0);
+      const toFree = dropCap - (toSlots.get(job.to) || 0);
       if (fromFree <= 0 || toFree <= 0) continue;
       available.push(job);
       fromSlots.set(job.from, (fromSlots.get(job.from) || 0) + 1);
       toSlots.set(job.to, (toSlots.get(job.to) || 0) + 1);
     }
     return available;
+  }
+
+  function parkUnassigned(robots) {
+    for (const robot of robots) {
+      if (robot.state === AMR.STATE.IDLE && !robot.job) robot.goToParking();
+    }
   }
 
   let rrCursor = 0;
@@ -133,7 +149,10 @@
     const robots = idleRobots(sim);
     if (!robots.length) return;
     let jobs = pendingJobs(sim);
-    if (!jobs.length) return;
+    if (!jobs.length) {
+      parkUnassigned(robots);
+      return;
+    }
 
     switch (algo) {
       case 'hungarian': {
@@ -219,6 +238,7 @@
         break;
       }
     }
+    parkUnassigned(robots);
   }
 
   AMR.dispatch = { run, hungarian, cost, ALGOS };

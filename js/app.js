@@ -27,12 +27,31 @@
     snapshots: {},
     sweepRows: null, sweepSpec: null,
     mc: null, mcRunning: false,
+    videoExport: null,
     activeRightPane: 'r-overview'
   };
 
   /* ================= 헬퍼 ================= */
   const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g,
     (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+  function clonePickDropMap(mapping) {
+    return Object.fromEntries(Object.entries(mapping || {}).map(([pickId, dropIds]) => [
+      pickId, Array.isArray(dropIds) ? dropIds.slice() : dropIds
+    ]));
+  }
+
+  function allowedDropIds(pickId) {
+    const drops = app.layout.byType('drop');
+    const mapping = app.params.pick_drop_map && typeof app.params.pick_drop_map === 'object'
+      ? app.params.pick_drop_map : (app.params.pick_drop_map = {});
+    const configured = mapping[pickId];
+    const ids = Array.isArray(configured) ? configured : (configured ? [configured] : []);
+    const valid = [...new Set(ids.filter((id) => drops.some((drop) => drop.id === id)))].slice(0, 2);
+    if (!valid.length && drops.length) valid.push(drops[0].id);
+    mapping[pickId] = valid;
+    return valid;
+  }
 
   const snapPt = (wp, e) => (app.snap && !(e && e.altKey))
     ? { x: Math.round(wp.x / SNAP) * SNAP, y: Math.round(wp.y / SNAP) * SNAP }
@@ -45,7 +64,10 @@
     const L = app.layout;
     return {
       name: L.name,
-      nodes: L.nodes.map((n) => ({ id: n.id, type: n.type, x: n.x, y: n.y, name: n.name, priority: n.priority })),
+      nodes: L.nodes.map((n) => ({
+        id: n.id, type: n.type, x: n.x, y: n.y, name: n.name, priority: n.priority,
+        ...(n.type === 'park' ? { parking_capacity: n.parking_capacity } : {})
+      })),
       edges: L.edges.map((e) => ({ a: e.a, b: e.b, dir: e.dir, lanes: e.lanes || 1, speedFactor: e.speedFactor || 1 })),
       counters: { ...L.counters }
     };
@@ -149,6 +171,15 @@
     syncParamUI(key);
     if (v === old) return;
 
+    if (key === 'reservation_pick_limit') app.params.reservation_pick_limit_customized = true;
+    if (key === 'release_interval') {
+      if (app.params.release_mode === 'total') app.sim.releaseTimer = 0;
+      else {
+        app.layout.byType('pick').forEach((pick) => {
+          if (pick.release_interval == null) delete app.sim.stationTimers[pick.id];
+        });
+      }
+    }
     if (key === 'pixel_scale') app.sim.graph.invalidateCache();
     if (key === 'fleet') app.sim.resizeFleet(v);
     if (key === 'mtbf' || key === 'mttr') {
@@ -174,6 +205,7 @@
       app.sim.graph.rebuild();
       app.sim.reset();
     }
+    $('#selTraffic').value = app.params.traffic_model;
 
     bindEvents();
     app.rend.resize();
@@ -190,6 +222,7 @@
     const sel = $('#presetSelect');
     sel.innerHTML = Object.entries(M.PRESETS)
       .map(([k, p]) => `<option value="${k}">${p.label}</option>`).join('');
+    sel.value = 'grid_factory';
   }
 
   function buildDispatchSelect() {
@@ -644,24 +677,14 @@
       return;
     }
 
-    const mapping = app.params.pick_drop_map && typeof app.params.pick_drop_map === 'object'
-      ? app.params.pick_drop_map : (app.params.pick_drop_map = {});
     list.innerHTML = picks.map((pick) => {
-      if (!drops.some((drop) => drop.id === mapping[pick.id])) mapping[pick.id] = drops[0].id;
+      const ids = allowedDropIds(pick.id);
+      const names = ids.map((id) => drops.find((drop) => drop.id === id)?.name).filter(Boolean);
       return `<div class="row between tiny" style="gap:8px;margin:5px 0">
         <b>${esc(pick.name)}</b>
-        <span style="color:var(--text-faint)">→</span>
-        <select data-pick-drop="${esc(pick.id)}" style="max-width:60%">${drops.map((drop) =>
-          `<option value="${esc(drop.id)}"${mapping[pick.id] === drop.id ? ' selected' : ''}>${esc(drop.name)}</option>`
-        ).join('')}</select>
+        <span style="color:var(--text-faint)">→ ${esc(names.join(', ') || '미지정')}</span>
       </div>`;
     }).join('');
-    $$('[data-pick-drop]', list).forEach((select) => {
-      select.addEventListener('change', () => {
-        app.params.pick_drop_map[select.dataset.pickDrop] = select.value;
-        saveState();
-      });
-    });
   }
 
   /* ================= 시나리오 ================= */
@@ -776,6 +799,7 @@
 
     /* --- 리포트 / 모달 --- */
     $('#btnReport').addEventListener('click', exportReport);
+    $('#btnVideoExport').addEventListener('click', toggleVideoExport);
     $('#btnHelp').addEventListener('click', () => $('#helpModal').classList.add('open'));
     $$('[data-close-modal]').forEach((b) => b.addEventListener('click', (e) => e.target.closest('.modal').classList.remove('open')));
     $$('.modal').forEach((m) => m.addEventListener('click', (e) => { if (e.target === m) m.classList.remove('open'); }));
@@ -791,11 +815,12 @@
       syncAutoReleaseLabel();
       refreshAnalytics();
     });
-    $('#selReleaseMode').addEventListener('change', (e) => {
-      app.params.release_mode = e.target.value;
+    $('#chkSameReleaseInterval').addEventListener('change', (e) => {
+      app.params.release_mode = e.target.checked ? 'total' : 'per_station';
       app.sim.stationTimers = {};
       app.sim.releaseTimer = 0;
       refreshAnalytics();
+      saveState();
     });
     $('#selDestinationMode').addEventListener('change', (e) => {
       app.params.destination_mode = e.target.value;
@@ -862,6 +887,10 @@
       refreshAnalytics();
     });
     $('#selTraffic').addEventListener('change', (e) => { app.params.traffic_model = e.target.value; refreshAnalytics(); });
+    $('#selPortDispatchPolicy').addEventListener('change', (e) => {
+      app.params.dispatch_port_policy = e.target.value;
+      refreshAnalytics();
+    });
     $('#chkBidir').addEventListener('change', (e) => {
       app.params.bidirectional = e.target.checked;
       app.sim.graph.rebuild();
@@ -958,7 +987,7 @@
     $('#btnMonteCarlo').addEventListener('click', runMonteCarlo);
     $$('[data-snap]').forEach((b) => b.addEventListener('click', () => {
       app.snapshots[b.dataset.snap] = {
-        params: { ...app.params, pick_drop_map: { ...app.params.pick_drop_map } },
+        params: { ...app.params, pick_drop_map: clonePickDropMap(app.params.pick_drop_map) },
         layout: layoutData(),
         result: A.evaluateScenario(app.sim, {})
       };
@@ -980,10 +1009,62 @@
     $('#inspClose').addEventListener('click', closeInspector);
     $('#inspDelete').addEventListener('click', deleteSelection);
     $('#inspBody').addEventListener('change', (ev) => {
+      const pickId = ev.target.dataset.pickDrop;
+      if (pickId) {
+        const n = app.layout.node(pickId);
+        if (!n) return;
+        const ids = allowedDropIds(pickId);
+        const dropId = ev.target.dataset.dropId;
+        let next;
+        if (ev.target.checked) {
+          if (ids.length >= 2 && !ids.includes(dropId)) {
+            ev.target.checked = false;
+            toast('픽업대당 드롭대는 최대 2곳까지 지정할 수 있습니다.', 'warn');
+            return;
+          }
+          next = ids.includes(dropId) ? ids : [...ids, dropId];
+        } else {
+          next = ids.filter((id) => id !== dropId);
+          if (!next.length) {
+            ev.target.checked = true;
+            toast('픽업대마다 드롭대를 최소 1곳 지정해야 합니다.', 'warn');
+            return;
+          }
+        }
+        app.params.pick_drop_map[pickId] = next;
+        refreshPickDropRules();
+        showInspector(n);
+        saveState();
+        return;
+      }
       const key = ev.target.dataset.insp;
       const n = app.rend.selected, e = app.rend.selectedEdge;
       if (!key || (!n && !e)) return;
       const v = ev.target.value;
+      if (n && key === 'releaseInterval') {
+        const raw = v.trim();
+        if (raw === '') {
+          if (n.release_interval == null) return;
+          pushHistory();
+          delete n.release_interval;
+        } else {
+          const seconds = Number(raw);
+          if (!Number.isFinite(seconds)) {
+            toast('배출 주기를 1~3600초 사이로 입력하세요.', 'warn');
+            ev.target.value = Number.isFinite(n.release_interval) ? n.release_interval : '';
+            return;
+          }
+          const interval = clamp(Math.round(seconds), 1, 3600);
+          if (n.release_interval === interval) return;
+          pushHistory();
+          n.release_interval = interval;
+        }
+        delete app.sim.stationTimers[n.id];
+        refreshAnalytics();
+        showInspector(n);
+        saveState();
+        return;
+      }
       pushHistory();
       if (n) {
         if (key === 'name') n.name = v.trim().slice(0, 24) || n.id;
@@ -995,6 +1076,18 @@
         if (key === 'speedFactor') e.speedFactor = clamp(parseFloat(v) || 1, 0.2, 1);
         afterLayoutChange(); showEdgeInspector(e);
       }
+    });
+    $('#inspBody').addEventListener('click', (ev) => {
+      const button = ev.target.closest('[data-clear-pick-release]');
+      if (!button) return;
+      const pick = app.layout.node(button.dataset.clearPickRelease);
+      if (!pick || pick.release_interval == null) return;
+      pushHistory();
+      delete pick.release_interval;
+      delete app.sim.stationTimers[pick.id];
+      refreshAnalytics();
+      showInspector(pick);
+      saveState();
     });
 
     bindCanvas();
@@ -1292,14 +1385,40 @@
     $('#inspTitle').textContent = `${M.NODE_TYPES[n.type].label} · ${n.id}`;
     const deg = (sim.graph.adj.get(n.id) || []).length;
     const isPort = n.type === 'pick' || n.type === 'drop';
+    const parkingClaims = n.type === 'park'
+      ? sim.robots.filter((robot) => robot.parkTarget === n.id && Number.isInteger(robot.parkSlot)).length
+      : 0;
     $('#inspBody').innerHTML = `
       <div class="field mb"><label>이름</label>
         <input type="text" data-insp="name" maxlength="24" value="${esc(n.name)}"></div>
       ${isPort ? `<div class="field mb"><label>수요 가중치 (1=기본, 2=2배 빈도)</label>
         <input type="number" data-insp="priority" min="0.1" max="10" step="0.1" value="${n.priority}"></div>` : ''}
+      ${n.type === 'pick' ? `<div class="field mb"><label>화물 배출 주기 (초)</label>
+        <div class="row" style="gap:6px">
+          <input type="number" data-insp="releaseInterval" min="1" max="3600" step="1"
+            value="${Number.isFinite(n.release_interval) ? n.release_interval : ''}"
+            placeholder="${app.params.release_interval}" aria-label="${esc(n.name)} 배출 주기" style="width:90px;flex:0 0 90px">
+          <button type="button" class="btn xs" data-clear-pick-release="${esc(n.id)}">공통값</button>
+        </div>
+        <div class="tiny muted" style="margin-top:3px">${app.params.release_mode === 'total'
+          ? '동일 적용이 켜져 있어 개별 주기는 현재 사용되지 않습니다.'
+          : '비워두면 좌측 공통 배출 주기를 사용합니다.'}</div>
+      </div>` : ''}
+      ${n.type === 'pick' ? `<div class="field mb"><label>허용 드롭대 (1~2곳)</label>
+        ${app.layout.byType('drop').length ? `<div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px">
+          ${app.layout.byType('drop').map((drop) =>
+            `<label class="switch" style="font-size:10px"><input type="checkbox" data-pick-drop="${esc(n.id)}" data-drop-id="${esc(drop.id)}"${allowedDropIds(n.id).includes(drop.id) ? ' checked' : ''}>${esc(drop.name)}</label>`
+          ).join('')}
+        </div><div class="tiny muted" style="margin-top:3px">두 곳을 지정하면 두 드롭대 중 하나를 무작위 선택합니다.</div>`
+          : '<div class="tiny muted">드롭대를 먼저 추가하세요.</div>'}</div>` : ''}
+      ${n.type === 'park' ? `<div class="field mb"><label>대기존 수용 차량 수</label>
+        <div class="strong">1대 (고정)</div>
+        <div class="tiny muted" style="margin-top:3px">대기 중 차량과 진입 예약 차량을 함께 셉니다. 만석이면 포트를 비운 가까운 경유 노드에서 대기합니다.</div>
+      </div>` : ''}
       <div class="insp-row"><span>좌표</span><b>${Math.round(n.x)}, ${Math.round(n.y)}</b></div>
       <div class="insp-row"><span>나가는 통로</span><b>${deg}개</b></div>
-      ${n.type !== 'waypoint' ? `<div class="insp-row"><span>현재 점유</span><b>${n.occupants.length}/${app.params.port_cap}${n.queue ? ` (대기 ${n.queue})` : ''}</b></div>
+      ${n.type === 'park' ? `<div class="insp-row"><span>점유/진입 예약</span><b>${parkingClaims}/1</b></div>` : ''}
+      ${n.type !== 'waypoint' && n.type !== 'park' ? `<div class="insp-row"><span>현재 점유</span><b>${n.occupants.length}/${app.params.port_cap}${n.queue ? ` (대기 ${n.queue})` : ''}</b></div>
       <div class="insp-row"><span>누적 대기</span><b>${fmt.n(n.waitAccum / 60, 1)}분</b></div>` : ''}
       ${n.type === 'pick' ? `<div class="insp-row"><span>적체 화물</span><b>${n.buffer}건</b></div>` : ''}
       ${isPort ? `<div class="insp-row"><span>처리 누적</span><b>${n.processed}건</b></div>` : ''}`;
@@ -1493,6 +1612,37 @@
     setTimeout(exportCurveCsv, 350);
   }
 
+  function toggleVideoExport() {
+    if (app.videoExport && app.videoExport.recording) {
+      app.videoExport.stop();
+      return;
+    }
+
+    const button = $('#btnVideoExport');
+    const exporter = new AMR.VideoExporter();
+    app.videoExport = exporter;
+    const started = exporter.start({
+      mapCanvas: $('#simCanvas'),
+      getSnapshot: () => ({ sim: app.sim, layoutName: app.layout.name }),
+      onState: (recording) => {
+        button.innerHTML = recording
+          ? '⏹ <span class="lbl">녹화 종료</span>'
+          : '🎥 <span class="lbl">영상</span>';
+        button.classList.toggle('danger', recording);
+        if (!recording && app.videoExport === exporter) app.videoExport = null;
+      },
+      onComplete: (blob) => {
+        const stamp = new Date().toLocaleString('sv-SE').replace(/[: ]/g, '-');
+        downloadBlob(blob, `AMR_시뮬레이션_${stamp}.webm`, blob.type || 'video/webm');
+        toast('🎥 결과 영상(WebM)을 저장했습니다.', 'ok');
+      },
+      onError: (message) => toast(`🎥 영상 내보내기 실패: ${esc(message)}`, 'err')
+    });
+
+    if (started) toast('🎥 녹화 중입니다. 종료 버튼을 누르면 WebM을 저장합니다. 긴 녹화는 메모리 사용량이 커질 수 있습니다.', 'ok');
+    else app.videoExport = null;
+  }
+
   function exportReport() {
     const sim = app.sim, p = app.params, k = sim.kpi();
     const diag = A.diagnose(sim);
@@ -1520,6 +1670,7 @@
     L.push(`  도킹 (픽/드롭)     : 1개당 ${p.t_pick}s / ${p.t_drop}s (CV ${p.cv_service})`);
     L.push(`  배차 알고리즘      : ${AMR.dispatch.ALGOS[p.dispatch_algo].label}`);
     L.push(`  교통 모델          : ${p.traffic_model}`);
+    L.push(`  포트 배차 정책      : ${p.dispatch_port_policy === 'throughput' ? '처리량 우선' : '교착 방지 우선'}`);
     L.push(`  투입 대수 / OEE    : ${p.fleet}대 / ${p.oee}%`);
     L.push(`  배터리             : ${p.bat_kwh}kWh, ${p.bat_min}~${p.bat_max}%, 충전 ${p.charge_kw}kW`);
     L.push(`  난수 시드          : ${p.seed} (재현 가능)`);
@@ -1630,10 +1781,17 @@
         else app.params[k] = d.params[k];
       });
     }
+    if (!d.params || d.params.reservation_pick_limit_customized !== true) {
+      M.sanitize(app.params, 'reservation_pick_limit', 1);
+      app.params.reservation_pick_limit_customized = false;
+    }
+    if (!['reservation', 'softgap', 'none'].includes(app.params.traffic_model)) app.params.traffic_model = 'none';
+    if (!['total', 'per_station'].includes(app.params.release_mode)) app.params.release_mode = 'total';
     if (!['random', 'mapped'].includes(app.params.destination_mode)) app.params.destination_mode = 'random';
+    if (!['reservation', 'throughput'].includes(app.params.dispatch_port_policy)) app.params.dispatch_port_policy = 'reservation';
     if (!app.params.pick_drop_map || typeof app.params.pick_drop_map !== 'object' ||
       Array.isArray(app.params.pick_drop_map)) app.params.pick_drop_map = {};
-    else app.params.pick_drop_map = { ...app.params.pick_drop_map };
+    else app.params.pick_drop_map = clonePickDropMap(app.params.pick_drop_map);
     app.layout.fromJSON(d.layout);
     if (d.theme) { document.body.className = d.theme; $('#themeSelect').value = d.theme; }
     if (d.snapshots) app.snapshots = d.snapshots;
@@ -1641,10 +1799,11 @@
     M.PARAM_SPEC.forEach((s) => syncParamUI(s.key));
     $('#chkAutoRelease').checked = !!app.params.auto_release;
     syncAutoReleaseLabel();
-    $('#selReleaseMode').value = app.params.release_mode;
+    $('#chkSameReleaseInterval').checked = app.params.release_mode === 'total';
     $('#selDestinationMode').value = app.params.destination_mode;
     $('#selDispatch').value = app.params.dispatch_algo;
     $('#selTraffic').value = app.params.traffic_model;
+    $('#selPortDispatchPolicy').value = app.params.dispatch_port_policy;
     $('#selChargePolicy').value = app.params.charge_policy;
     $('#chkBidir').checked = app.params.bidirectional !== false;
     $('#chkFailures').checked = !!app.params.failures;

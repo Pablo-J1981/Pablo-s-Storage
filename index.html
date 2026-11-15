@@ -39,6 +39,7 @@
       <button class="btn" id="btnSave">💾 <span class="lbl">저장</span></button>
       <button class="btn" id="btnLoad">📂 <span class="lbl">불러오기</span></button>
       <button class="btn" id="btnReport">📑 <span class="lbl">리포트</span></button>
+      <button class="btn" id="btnVideoExport" title="주요 지표를 합성한 WebM 결과 영상 녹화 시작/종료">🎥 <span class="lbl">영상</span></button>
       <button class="btn" id="btnHelp" title="사용 가이드">❓</button>
       <select id="themeSelect" style="width:auto" aria-label="테마">
         <option value="theme-hanwha">🟠 한화 ICT</option>
@@ -80,11 +81,13 @@
               </label>
             </div>
             <div class="field mb">
-              <label>배출 주기 적용 기준</label>
-              <select id="selReleaseMode">
-                <option value="total">공장 전체 — 전 피킹대 통합 N초마다 1건</option>
-                <option value="per_station">개별 피킹대 — 각 피킹대 독립 N초마다 1건</option>
-              </select>
+              <label class="row" style="gap:6px;cursor:pointer">
+                <input type="checkbox" id="chkSameReleaseInterval" checked>
+                배출주기 동일적용
+              </label>
+              <div class="tiny muted" style="margin-top:4px">
+                켜짐: 공장 전체에서 공통 주기마다 1건 배출. 꺼짐: 맵에서 설정한 픽업대별 주기를 사용합니다.
+              </div>
             </div>
             <div class="field mb">
               <label>픽업대별 도착 드롭 배정</label>
@@ -93,11 +96,12 @@
                 <option value="mapped">지정 — 픽업대별 드롭대 지정</option>
               </select>
               <div class="tiny muted" style="margin-top:4px">
-                자동 배출과 랜덤 20건에 적용됩니다. 개별 등록·CSV 작업은 입력한 드롭대를 사용합니다.
+                지정 모드에서는 맵에서 픽업대를 선택해 인스펙터에서 허용 드롭대를 1~2곳 지정하세요.
+                자동 배출과 랜덤 20건에 적용되며, 개별 등록·CSV는 입력한 드롭대를 사용합니다.
               </div>
             </div>
             <div class="card-box" id="pickDropRules" style="display:none;margin:0 0 10px;background:var(--surface-3)">
-              <div class="section-title" style="margin-top:0">픽업대 → 드롭대 규칙</div>
+              <div class="section-title" style="margin-top:0">현재 픽업대 → 드롭대 규칙</div>
               <div id="pickDropRuleList"></div>
             </div>
             <div data-param="release_interval"></div>
@@ -220,10 +224,24 @@
           <div class="field mb">
             <label>통행 제어 방식</label>
             <select id="selTraffic">
+              <option value="none">이상화 — 충돌·정체 없음 (기본값, 이론 상한)</option>
               <option value="reservation">간선 예약제 — 구간 단위 점유 잠금 (가장 현실적)</option>
               <option value="softgap">차간거리 제어 — 추종 감속만 적용</option>
-              <option value="none">이상화 — 충돌·정체 없음 (이론 상한)</option>
             </select>
+          </div>
+          <div class="field mb">
+            <label>포트 배차 정책</label>
+            <select id="selPortDispatchPolicy">
+              <option value="reservation">교착 방지 우선 — 진행 중 작업이 픽업·드롭 슬롯 예약</option>
+              <option value="throughput">처리량 우선 — 픽업 완료 즉시 픽업 슬롯 해제</option>
+            </select>
+            <div data-param="reservation_pick_limit"></div>
+            <div class="tiny muted" style="margin-top:4px">
+              처리량 우선은 픽업 이동·적재 중에는 픽업 슬롯을 예약하고, 적재를 마쳐 픽업대를 떠나면 다음 작업을 배차합니다.
+              간선 예약은 현재 주행 중인 간선 1구간만 잠그고 다음 노드 도착 시 해제합니다.
+              간선 예약 모드에서 픽업대별 배차 한도를 적용합니다. 실제 포트 동시 수용 대수와는 별도이며, 한도를 높이면 대기·교착 위험이 커질 수 있습니다.
+              처리량 우선에서는 목적지별 운행 중 작업을 최대 2건까지 허용합니다.
+            </div>
           </div>
           <label class="switch mb"><input type="checkbox" id="chkBidir" checked> 양방향 통행 허용</label>
           <div class="tiny muted mb">
@@ -703,6 +721,7 @@
 <script src="js/renderer.js"></script>
 <script src="js/analytics.js"></script>
 <script src="js/charts.js"></script>
+<script src="js/video-export.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>

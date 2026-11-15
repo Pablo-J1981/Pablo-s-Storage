@@ -29,12 +29,12 @@
     idle: '⚪ 유휴', to_pick: '🔵 픽업이동', queue_pick: '🟡 픽업대기', loading: '🟢 적재중',
     to_drop: '🟠 이송중', queue_drop: '🟡 드롭대기', unloading: '🟢 하역중',
     to_charge: '🔻 충전이동', queue_charge: '🟡 충전대기', charging: '⚡ 충전중',
-    to_park: '🟣 대기존이동', blocked: '🔴 정체', fault: '🛠 고장'
+    to_park: '🟣 대기 위치 이동', blocked: '🔴 정체', fault: '🛠 고장'
   };
 
-  /* 정차 중(포트·대기 위치)인 상태 — 차간거리 장애물에서 제외 */
+  /* 실제 포트/대기 위치에 정차한 차량만 장애물에서 제외; 포트 대기열은 포함 */
   const DOCKED = new Set([
-    STATE.IDLE, STATE.QUEUE_PICK, STATE.LOADING, STATE.QUEUE_DROP,
+    STATE.IDLE, STATE.LOADING,
     STATE.UNLOADING, STATE.QUEUE_CHARGE, STATE.CHARGING
   ]);
   const DL_WAIT = 4;    // 이 시간(초) 이상 막히면 우회·교착 검사 시작
@@ -50,8 +50,10 @@
       this.heading = 0;
       this.speed = 0;                 // m/s 현재 속도
       this.atNode = node ? node.id : null;
+      this.lastNode = null;
       this.nextNode = null;
       this.path = [];
+      this.routeVisited = [];
       this.state = STATE.IDLE;
       this.job = null;
       this.batch = [];                // 묶음 적재된 추가 작업
@@ -61,6 +63,9 @@
       this.soc = 60 + sim.rng.range(0, 35);  // %
       this.heldEdge = null;           // 예약 중인 간선 key
       this.heldPort = null;           // 점유 포트 id
+      this.portExitPending = false;
+      this.parkTarget = null;
+      this.parkSlot = null;
       this.taskLabel = '유휴 대기';
       // 통계
       this.distM = 0;
@@ -81,6 +86,7 @@
     setPath(path) {
       this.path = (path && path.length > 1) ? path.slice(1) : [];
       this.nextNode = this.path.length ? this.path[0] : null;
+      this.routeVisited = path && path.length ? [path[0]] : (this.atNode ? [this.atNode] : []);
       this.clearStall();
     }
 
@@ -140,6 +146,12 @@
         if (m < gap) { gap = m; this._front = o; }
       }
       return gap;
+    }
+
+    releasePortAfterClearance() {
+      if (!this.portExitPending || !this.heldPort) return;
+      const port = this.sim.layout.node(this.heldPort);
+      if (port && Math.hypot(this.x - port.x, this.y - port.y) >= 45) this.releasePort();
     }
 
     acquireEdge(fromId, toId) {
@@ -292,9 +304,12 @@
 
       if (stepM >= distM - 1e-6) {
         this.x = tgt.x; this.y = tgt.y;
+        this.lastNode = this.atNode;
         this.atNode = tgt.id;
+        this.routeVisited.push(tgt.id);
         this.path.shift();
         this.nextNode = this.path.length ? this.path[0] : null;
+        this.releasePortAfterClearance();
         // 혼잡 기록
         this.sim.noteEdgeFlow(this.heldEdge);
         this.releaseEdge();
@@ -308,6 +323,7 @@
       const stepPx = this.g.mToPx(stepM);
       this.x += (dx / distPx) * stepPx;
       this.y += (dy / distPx) * stepPx;
+      this.releasePortAfterClearance();
       return false;
     }
 
@@ -329,7 +345,14 @@
     tryOccupy(node) {
       const cap = this.p.port_cap;
       if (node.occupants.includes(this.id)) return true;
-      if (node.occupants.length < cap) { node.occupants.push(this.id); this.heldPort = node.id; return true; }
+      const queue = node.queueRobots || [];
+      if (queue.length && queue[0] !== this.id) return false;
+      if (node.occupants.length < cap) {
+        node.occupants.push(this.id);
+        this.heldPort = node.id;
+        this.portExitPending = false;
+        return true;
+      }
       return false;
     }
 
@@ -338,6 +361,152 @@
       const n = this.sim.layout.node(this.heldPort);
       if (n) n.occupants = n.occupants.filter((r) => r !== this.id);
       this.heldPort = null;
+      this.portExitPending = false;
+    }
+
+    queueAtPort(node, state) {
+      if (!node.queueRobots) node.queueRobots = [];
+      if (!node.queueRobots.includes(this.id)) {
+        node.queueRobots.push(this.id);
+        node.queueSequence = (node.queueSequence || 0) + 1;
+        this.queueTicket = node.queueSequence;
+      }
+      node.queue = node.queueRobots.length;
+      let remaining = 45 + ((this.queueTicket || node.queueSequence) - 1) * 36;
+      let route = this.routeVisited;
+      if (route.length < 2) {
+        const candidates = [...this.sim.layout.byType('waypoint'), ...this.sim.layout.byType('park')];
+        let best = null;
+        for (const candidate of candidates) {
+          const path = this.g.findPath(candidate.id, node.id);
+          if (path.ok && path.path.length > 1 && (!best || path.px < best.px)) best = path;
+        }
+        if (best) route = best.path;
+      }
+      for (let i = route.length - 1; i > 0; i--) {
+        const downstream = this.sim.layout.node(route[i]);
+        const upstream = this.sim.layout.node(route[i - 1]);
+        if (!downstream || !upstream) continue;
+        const length = Math.hypot(upstream.x - downstream.x, upstream.y - downstream.y);
+        if (length <= 0) continue;
+        if (remaining <= length) {
+          const ratio = remaining / length;
+          this.x = downstream.x + (upstream.x - downstream.x) * ratio;
+          this.y = downstream.y + (upstream.y - downstream.y) * ratio;
+          this.atNode = upstream.id;
+          this.path = route.slice(i);
+          this.nextNode = this.path[0];
+          this.routeVisited = route.slice(0, i);
+          this.acquireEdge(upstream.id, downstream.id);
+          break;
+        }
+        remaining -= length;
+      }
+      if (route.length > 1 && !this.nextNode) {
+        const upstream = this.sim.layout.node(route[0]);
+        const downstream = this.sim.layout.node(route[1]);
+        const length = upstream && downstream ? Math.hypot(upstream.x - downstream.x, upstream.y - downstream.y) : 0;
+        if (length > 0) {
+          this.x = upstream.x + (upstream.x - downstream.x) / length * remaining;
+          this.y = upstream.y + (upstream.y - downstream.y) / length * remaining;
+          this.atNode = upstream.id;
+          this.path = route.slice(1);
+          this.nextNode = this.path[0];
+          this.routeVisited = [upstream.id];
+          this.acquireEdge(upstream.id, downstream.id);
+        }
+      }
+      this.state = state;
+    }
+
+    beginPortEntry(node, state) {
+      if (node.queueRobots[0] !== this.id || !this.tryOccupy(node)) return false;
+      this.leaveQueue();
+      this.state = state;
+      this.job.status = 'assigned';
+      return true;
+    }
+
+    startPortExit() {
+      const port = this.heldPort && this.sim.layout.node(this.heldPort);
+      if (!port) return false;
+      const candidates = this.sim.layout.nodes.filter((node) =>
+        node.id !== port.id &&
+        (node.type === 'waypoint' || (node.type === 'park' && this.parkingSlotFor(node) != null)));
+      let best = null;
+      for (const node of candidates) {
+        const route = this.g.findPath(port.id, node.id, this.p.traffic_model !== 'none');
+        if (route.ok && route.path.length > 1 && (!best || route.px < best.route.px)) {
+          best = { node, route };
+        }
+      }
+      if (!best) return false;
+      if (best.node.type === 'park' && !this.reserveParkingSlot(best.node)) return false;
+      this.portExitPending = true;
+      if (best.node.type !== 'park') {
+        this.parkTarget = null;
+        this.parkSlot = null;
+      }
+      this.setPath(best.route.path);
+      this.state = STATE.TO_PARK;
+      return true;
+    }
+
+    parkingSlotFor(node) {
+      const capacity = 1;
+      const claims = this.sim.robots.filter((robot) =>
+        robot !== this && robot.parkTarget === node.id);
+      if (claims.length >= capacity) return null;
+      const taken = new Set(claims
+        .map((robot) => robot.parkSlot)
+        .filter((slot) => Number.isInteger(slot)));
+      for (let slot = 0; slot < capacity; slot++) {
+        if (!taken.has(slot)) return slot;
+      }
+      return null;
+    }
+
+    reserveParkingSlot(node) {
+      const slot = this.parkingSlotFor(node);
+      if (slot == null) return false;
+      this.parkTarget = node.id;
+      this.parkSlot = slot;
+      return true;
+    }
+
+    setParkingPosition(node) {
+      if ((this.parkTarget !== node.id || !Number.isInteger(this.parkSlot)) &&
+        !this.reserveParkingSlot(node)) return false;
+      this.x = node.x;
+      this.y = node.y;
+      return true;
+    }
+
+    goToParking() {
+      if (this.state !== STATE.IDLE || this.job) return false;
+      const parks = this.sim.layout.byType('park');
+      if (!parks.length) return false;
+      const currentPark = parks.find((node) => node.id === this.atNode);
+      if (currentPark) {
+        if (this.parkTarget !== currentPark.id || !Number.isInteger(this.parkSlot)) {
+          this.setParkingPosition(currentPark);
+        }
+        return false;
+      }
+
+      let best = null;
+      for (const node of parks) {
+        if (this.parkingSlotFor(node) == null) continue;
+        const route = this.g.findPath(this.atNode, node.id);
+        if (!route.ok || route.path.length < 2) continue;
+        const load = this.sim.robots.filter((robot) => robot !== this && robot.parkTarget === node.id).length;
+        const cost = route.px + load * 100;
+        if (!best || cost < best.cost) best = { node, route, cost };
+      }
+      if (!best || !this.reserveParkingSlot(best.node)) return false;
+      this.setPath(best.route.path);
+      this.state = STATE.TO_PARK;
+      return true;
     }
 
     /** 대기열에서 빠질 때 포트의 대기 카운터 정리 (상태 변경 전에 호출) */
@@ -347,7 +516,15 @@
       else if (this.state === STATE.QUEUE_DROP) id = this.job && this.job.to;
       else if (this.state === STATE.QUEUE_CHARGE) id = this.atNode;
       const n = id && this.sim.layout.node(id);
-      if (n) n.queue = Math.max(0, n.queue - 1);
+      if (n) {
+        if (this.state === STATE.QUEUE_CHARGE) {
+          n.queue = Math.max(0, n.queue - 1);
+        } else {
+          if (n.queueRobots) n.queueRobots = n.queueRobots.filter((robotId) => robotId !== this.id);
+          n.queue = n.queueRobots ? n.queueRobots.length : Math.max(0, n.queue - 1);
+          if (!n.queue) n.queueSequence = 0;
+        }
+      }
     }
 
     goto(targetId, useCongestion) {
@@ -419,6 +596,10 @@
           this.leaveQueue();
           this.state = STATE.FAULT;
           this.faultTimer = Math.max(5, S.rng.service(p.mttr * 60, 0.4));
+          if (this.parkTarget && this.atNode !== this.parkTarget) {
+            this.parkTarget = null;
+            this.parkSlot = null;
+          }
           this.releaseEdge(); this.releasePort();
           this.releaseJobs();
           this.path = []; this.nextNode = null;
@@ -448,8 +629,7 @@
             if (this.tryOccupy(node)) {
               this.beginLoading();
             } else {
-              this.state = STATE.QUEUE_PICK;
-              node.queue++;
+              this.queueAtPort(node, STATE.QUEUE_PICK);
               this.job.status = 'queue';
               S.metrics.portWaitEvents++;
             }
@@ -464,10 +644,7 @@
           if (!node) { this.abortJob(); break; }
           node.waitAccum += dt;
           this.taskLabel = `⏳ ${node.name} 포트 대기`;
-          if (this.tryOccupy(node)) {
-            node.queue = Math.max(0, node.queue - 1);
-            this.beginLoading();
-          }
+          this.beginPortEntry(node, STATE.TO_PICK);
           break;
         }
 
@@ -481,7 +658,7 @@
             const node = S.layout.node(this.job.from);
             this.cargo = qty;
             if (node) { node.buffer = Math.max(0, node.buffer - qty); node.processed += qty; }
-            this.releasePort();
+            this.portExitPending = !!this.heldPort;
             if (this.dropPathReady) {
               this.state = STATE.TO_DROP;
               this.job.status = 'moving';
@@ -501,8 +678,7 @@
             if (this.tryOccupy(node)) {
               this.beginUnloading();
             } else {
-              this.state = STATE.QUEUE_DROP;
-              node.queue++;
+              this.queueAtPort(node, STATE.QUEUE_DROP);
               this.job.status = 'queue';
               S.metrics.portWaitEvents++;
             }
@@ -517,10 +693,7 @@
           if (!node) { this.abortJob(); break; }
           node.waitAccum += dt;
           this.taskLabel = `⏳ ${node.name} 포트 대기`;
-          if (this.tryOccupy(node)) {
-            node.queue = Math.max(0, node.queue - 1);
-            this.beginUnloading();
-          }
+          this.beginPortEntry(node, STATE.TO_DROP);
           break;
         }
 
@@ -536,8 +709,10 @@
             all.forEach((j, i) => S.completeJob(this, j, i === 0));
             this.jobsDone += all.length;
             this.cargo = 0; this.batch = []; this.job = null;
-            this.releasePort();
-            this.state = STATE.IDLE;
+            if (!this.startPortExit()) {
+              this.releasePort();
+              this.state = STATE.IDLE;
+            }
           }
           break;
         }
@@ -577,8 +752,14 @@
 
         case STATE.TO_PARK: {
           this.tIdle += dt;
-          this.taskLabel = '🅿 대기존 이동';
-          if (this.drive(dt)) this.state = STATE.IDLE;
+          this.taskLabel = '🅿 대기 위치 이동';
+          if (this.drive(dt)) {
+            this.releasePort();
+            const park = this.parkTarget && S.layout.node(this.parkTarget);
+            if (park && park.id === this.atNode) this.setParkingPosition(park);
+            else { this.parkTarget = null; this.parkSlot = null; }
+            this.state = STATE.IDLE;
+          }
           break;
         }
       }
@@ -588,6 +769,8 @@
       this.leaveQueue();
       this.releaseJobs();
       this.releaseEdge(); this.releasePort();
+      this.parkTarget = null;
+      this.parkSlot = null;
       this.path = []; this.nextNode = null;
       this.clearStall();
       this.state = STATE.IDLE;
@@ -606,6 +789,8 @@
         if (cost < bestCost) { bestCost = cost; best = { c, path: r.path }; }
       });
       if (!best) return false;
+      this.parkTarget = null;
+      this.parkSlot = null;
       this.setPath(best.path);
       this.state = STATE.TO_CHARGE;
       return true;
@@ -616,6 +801,8 @@
       job.robot = this.id;
       job.tAssigned = this.sim.t;
       this.job = job;
+      this.parkTarget = null;
+      this.parkSlot = null;
       this.batch = [];
       this.tripStart = this.sim.t;
       this.tripQueue = 0;
@@ -682,7 +869,8 @@
         faults: 0, chargeWh: 0, released: 0, reroutes: 0, deadlocks: 0
       };
       this.layout.nodes.forEach((n) => {
-        n.occupants = []; n.queue = 0; n.buffer = 0; n.processed = 0; n.waitAccum = 0;
+        n.occupants = []; n.queue = 0; n.queueRobots = []; n.queueSequence = 0;
+        n.buffer = 0; n.processed = 0; n.waitAccum = 0;
       });
       this.layout.edges.forEach((e) => { e.flow = 0; e.load = 0; });
       this.graph.congestion.clear();
@@ -693,7 +881,7 @@
 
     spawnFleet() {
       const L = this.layout;
-      const base = [...L.byType('park'), ...L.byType('charge'), ...L.byType('waypoint')];
+      const base = [...L.byType('charge'), ...L.byType('waypoint')];
       const pool = base.length ? base : L.nodes;
       this.robots = [];
       this.robotMap.clear();
@@ -715,7 +903,7 @@
         removed.forEach((r) => { r.abortJob(); this.robotMap.delete(r.id); });
       } else {
         const L = this.layout;
-        const pool = [...L.byType('park'), ...L.byType('charge'), ...L.byType('waypoint')];
+        const pool = [...L.byType('charge'), ...L.byType('waypoint')];
         const base = pool.length ? pool : L.nodes;
         if (!base.length) return;
         for (let i = this.robots.length + 1; i <= n; i++) {
@@ -754,7 +942,15 @@
       const drops = this.layout.byType('drop');
       if (!drops.length) return null;
       if (this.params.destination_mode === 'mapped') {
-        return drops.find((n) => n.id === this.params.pick_drop_map?.[fromNode.id]) || drops[0];
+        const configured = this.params.pick_drop_map?.[fromNode.id];
+        const allowedIds = Array.isArray(configured) ? configured : (configured ? [configured] : []);
+        const allowedDrops = allowedIds
+          .map((id) => drops.find((n) => n.id === id))
+          .filter((n, i, list) => n && list.indexOf(n) === i)
+          .slice(0, 2);
+        return allowedDrops.length
+          ? this.rng.weighted(allowedDrops, (n) => n.priority || 1)
+          : drops[0];
       }
       return this.rng.weighted(drops, (n) => n.priority || 1);
     }
@@ -783,20 +979,27 @@
         this.releaseCycle = baseInterval;
       } else {
         let minRem = Infinity;
+        let minCycle = baseInterval;
         picks.forEach((pk) => {
-          if (this.stationTimers[pk.id] == null) this.stationTimers[pk.id] = baseInterval;
+          const configuredInterval = Number.isFinite(pk.release_interval) && pk.release_interval > 0
+            ? pk.release_interval : p.release_interval;
+          const stationInterval = Math.max(0.5, configuredInterval / peak);
+          if (this.stationTimers[pk.id] == null) this.stationTimers[pk.id] = stationInterval;
           this.stationTimers[pk.id] -= dt;
           if (this.stationTimers[pk.id] <= 0) {
             const to = this.destinationFor(pk);
             if (to) this.createJob(pk, to);
             this.stationTimers[pk.id] += p.demand_cv > 0
-              ? Math.max(0.2, this.rng.service(baseInterval, p.demand_cv))
-              : baseInterval;
+              ? Math.max(0.2, this.rng.service(stationInterval, p.demand_cv))
+              : stationInterval;
           }
-          minRem = Math.min(minRem, this.stationTimers[pk.id]);
+          if (this.stationTimers[pk.id] < minRem) {
+            minRem = this.stationTimers[pk.id];
+            minCycle = stationInterval;
+          }
         });
         this.nextReleaseIn = isFinite(minRem) ? minRem : 0;
-        this.releaseCycle = baseInterval;
+        this.releaseCycle = minCycle;
       }
     }
 
@@ -922,10 +1125,17 @@
     demandUPH() {
       const p = this.params;
       if (!p.auto_release) return 0;
-      const picks = this.layout.byType('pick').length || 1;
+      const picks = this.layout.byType('pick');
       const base = 3600 / Math.max(0.5, p.release_interval);
+      const perStation = picks.length
+        ? picks.reduce((sum, pick) => {
+          const interval = Number.isFinite(pick.release_interval) && pick.release_interval > 0
+            ? pick.release_interval : p.release_interval;
+          return sum + 3600 / Math.max(0.5, interval);
+        }, 0)
+        : base;
       const peakAvg = (1 + p.peak_ratio) / 2;
-      return (p.release_mode === 'total' ? base : base * picks) * (p.peak_ratio > 1 ? peakAvg : 1);
+      return (p.release_mode === 'total' ? base : perStation) * (p.peak_ratio > 1 ? peakAvg : 1);
     }
 
     /**

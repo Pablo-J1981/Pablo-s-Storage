@@ -23,6 +23,7 @@
     { key: 't_drop',       group: 'port',    label: '드롭 도킹+하역 시간 (1개당)', unit: 's', min: 2, max: 180,  step: 1,    def: 12,  dec: 0 },
     { key: 'cv_service',   group: 'port',    label: '하역시간 변동계수(CV)', unit: '',     min: 0,   max: 0.8,  step: 0.05, def: 0.2, dec: 2 },
     { key: 'port_cap',     group: 'port',    label: '포트 동시 수용 대수',   unit: '대',   min: 1,   max: 4,    step: 1,    def: 1,   dec: 0 },
+    { key: 'reservation_pick_limit', group: 'port', label: '간선예약 픽업대별 배차 한도', unit: '건', min: 1, max: 4, step: 1, def: 1, dec: 0 },
 
     // --- 수요 ---
     { key: 'release_interval', group: 'demand', label: '화물 배출 주기',     unit: 's',    min: 1,   max: 3600,  step: 1,    def: 25,  dec: 0 },
@@ -61,10 +62,13 @@
     PARAM_SPEC.forEach((s) => (p[s.key] = s.def));
     // 비수치 설정
     p.dispatch_algo = 'hungarian';
-    p.traffic_model = 'reservation';   // 'reservation' | 'softgap' | 'none'
+    p.traffic_model = 'none';          // 'reservation' | 'softgap' | 'none'
     p.release_mode = 'total';          // 'total' | 'per_station'
+    p.reservation_pick_limit = 1;
+    p.reservation_pick_limit_customized = false;
     p.destination_mode = 'random';     // 'random' | 'mapped'
     p.pick_drop_map = {};
+    p.dispatch_port_policy = 'reservation'; // 'reservation' | 'throughput'
     p.auto_release = true;
     p.charge_policy = 'threshold';     // 'threshold' | 'opportunity'
     p.bidirectional = true;            // false 면 양방향 통로를 a→b 일방통행으로 취급
@@ -137,10 +141,13 @@
         name: name || `${NODE_TYPES[type].label} ${id}`,
         occupants: [],         // 현재 점유 로봇 id
         queue: 0,              // 대기 로봇 수
+        queueRobots: [],       // 포트 대기 순서 (시뮬레이션 중)
+        queueSequence: 0,      // 연속된 대기 위치 배정용
         buffer: 0,             // 미처리 화물 수 (pick)
         processed: 0,          // 처리 누적
         waitAccum: 0,          // 누적 대기 시간
-        priority: 1            // 수요 가중치
+        priority: 1,           // 수요 가중치
+        parking_capacity: type === 'park' ? 1 : undefined
       };
       this.nodes.push(n);
       return n;
@@ -163,7 +170,9 @@
     fromJSON(o) {
       if (!o || !Array.isArray(o.nodes)) return false;
       this.nodes = o.nodes.map((n) => ({
-        occupants: [], queue: 0, buffer: 0, processed: 0, waitAccum: 0, priority: 1, ...n
+        ...n,
+        occupants: [], queue: 0, queueRobots: [], queueSequence: 0,
+        ...(n.type === 'park' ? { parking_capacity: 1 } : {})
       }));
       this.edges = (o.edges || []).map((e) =>
         Array.isArray(e)
@@ -184,40 +193,57 @@
     }
   }
 
+  function buildGridFactory(L, name, cols, rows) {
+    L.reset(); L.name = name;
+    const W = 980, H = 620;
+    const x0 = 150, x1 = W - 130, y0 = 90, y1 = H - 140;
+    const dx = (x1 - x0) / (cols - 1), dy = (y1 - y0) / (rows - 1);
+    const grid = {};
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const n = L.addNode('waypoint', x0 + c * dx, y0 + r * dy);
+        grid[`${r}_${c}`] = n.id;
+      }
+    }
+    for (let r = 0; r < rows; r++)
+      for (let c = 0; c < cols - 1; c++) L.addEdge(grid[`${r}_${c}`], grid[`${r}_${c + 1}`]);
+    for (let c = 0; c < cols; c++)
+      for (let r = 0; r < rows - 1; r++) L.addEdge(grid[`${r}_${c}`], grid[`${r + 1}_${c}`]);
+
+    const portRows = [0, 1, 2, 3].map((i) => Math.round(i * (rows - 1) / 3));
+    portRows.forEach((row, i) => {
+      const y = y0 + row * dy;
+      const p = L.addNode('pick', 62, y, `피킹 #${i + 1}`);
+      L.addEdge(p.id, grid[`${row}_0`]);
+      const alternateRow = row === 0 ? 1 : row - 1;
+      L.addEdge(p.id, grid[`${alternateRow}_0`]);
+      const d = L.addNode('drop', W - 52, y, `드롭 #${i + 1}`);
+      L.addEdge(d.id, grid[`${row}_${cols - 1}`]);
+      L.addEdge(d.id, grid[`${alternateRow}_${cols - 1}`]);
+    });
+
+    const chargeCols = [0.2, 0.5, 0.8].map((ratio) => Math.round((cols - 1) * ratio));
+    chargeCols.forEach((col, i) => {
+      const c = L.addNode('charge', x0 + col * dx, H - 60, `충전소 #${i + 1}`);
+      L.addEdge(c.id, grid[`${rows - 1}_${col}`]);
+    });
+    const mid = Math.floor((cols - 1) / 2);
+    const park = L.addNode('park', W / 2, H - 120, '대기존 #1');
+    L.addEdge(park.id, grid[`${rows - 1}_${mid}`]);
+    L.addEdge(park.id, grid[`${rows - 1}_${mid + 1}`]);
+  }
+
   /* ====== 레이아웃 프리셋 ====== */
   const PRESETS = {
     grid_factory: {
-      label: '🏭 표준 스마트공장 (그리드)',
-      desc: '피킹 4 · 드롭 4 · 충전 3 · 격자 통로',
-      build(L) {
-        L.reset(); L.name = '표준 스마트공장';
-        const W = 980, H = 620;
-        const cols = 6, rows = 4;
-        const grid = {};
-        for (let r = 0; r < rows; r++) {
-          for (let c = 0; c < cols; c++) {
-            const n = L.addNode('waypoint', 150 + c * ((W - 280) / (cols - 1)), 90 + r * ((H - 230) / (rows - 1)));
-            grid[`${r}_${c}`] = n.id;
-          }
-        }
-        for (let r = 0; r < rows; r++)
-          for (let c = 0; c < cols - 1; c++) L.addEdge(grid[`${r}_${c}`], grid[`${r}_${c + 1}`]);
-        for (let c = 0; c < cols; c++)
-          for (let r = 0; r < rows - 1; r++) L.addEdge(grid[`${r}_${c}`], grid[`${r + 1}_${c}`]);
-        for (let r = 0; r < rows; r++) {
-          const p = L.addNode('pick', 62, 90 + r * ((H - 230) / (rows - 1)), `피킹 #${r + 1}`);
-          L.addEdge(p.id, grid[`${r}_0`]);
-          const d = L.addNode('drop', W - 52, 90 + r * ((H - 230) / (rows - 1)), `드롭 #${r + 1}`);
-          L.addEdge(d.id, grid[`${r}_${cols - 1}`]);
-        }
-        for (let i = 0; i < 3; i++) {
-          const c = L.addNode('charge', 300 + i * 190, H - 60, `충전소 #${i + 1}`);
-          L.addEdge(c.id, grid[`${rows - 1}_${1 + i * 2}`]);
-        }
-        const k = L.addNode('park', W / 2, H - 120, '대기존');
-        L.addEdge(k.id, grid[`${rows - 1}_${2}`]);
-        L.addEdge(k.id, grid[`${rows - 1}_${3}`]);
-      }
+      label: '🏭 표준 스마트공장 그리드 - 표준',
+      desc: '6×4 격자 · 피킹 4 · 드롭 4 · 충전 3',
+      build(L) { buildGridFactory(L, '표준 스마트공장 그리드 - 표준', 6, 4); }
+    },
+    grid_factory_narrow: {
+      label: '🏭 표준 스마트공장 그리드 - 좁음',
+      desc: '10×10 격자 · 촘촘한 통로 · 간선 예약 교통 권장',
+      build(L) { buildGridFactory(L, '표준 스마트공장 그리드 - 좁음', 10, 10); }
     },
     loop_conveyor: {
       label: '🔁 단방향 루프 (일방통행)',
@@ -244,6 +270,8 @@
         });
         const c1 = L.addNode('charge', cx, cy, '충전소 #1');
         L.addEdge(ring[0], c1.id); L.addEdge(c1.id, ring[8]);
+        const park = L.addNode('park', 430, 590, '대기존 #1');
+        L.addEdge(park.id, ring[4]); L.addEdge(park.id, ring[5]);
       }
     },
     cross_dock: {
@@ -253,6 +281,7 @@
         L.reset(); L.name = '크로스도크 센터';
         const W = 1000, laneY = [200, 320, 440];
         const spineIds = [];
+        const parkApproaches = [];
         for (let i = 0; i < 9; i++) {
           const n = L.addNode('waypoint', 100 + i * ((W - 200) / 8), 320);
           spineIds.push(n.id);
@@ -262,17 +291,28 @@
           const x = 140 + i * ((W - 280) / 5);
           const up = L.addNode('waypoint', x, laneY[0]);
           const dn = L.addNode('waypoint', x, laneY[2]);
+          if (i === 0) parkApproaches.push(up.id, dn.id);
           const near = spineIds[Math.min(8, Math.round((x - 100) / ((W - 200) / 8)))];
+          const nearIndex = spineIds.indexOf(near);
+          const alternateIndex = nearIndex === 8 ? nearIndex - 1 : nearIndex + 1;
           L.addEdge(up.id, near); L.addEdge(dn.id, near);
           const p = L.addNode('pick', x, 110, `입고독 #${i + 1}`);
           L.addEdge(p.id, up.id);
+          const alternate = L.addNode('waypoint', x + 24, 250);
+          L.addEdge(p.id, alternate.id);
+          L.addEdge(alternate.id, spineIds[alternateIndex]);
           const d = L.addNode('drop', x, 530, `출고독 #${i + 1}`);
           L.addEdge(d.id, dn.id);
+          const alternateDrop = L.addNode('waypoint', x + 24, 390);
+          L.addEdge(d.id, alternateDrop.id);
+          L.addEdge(alternateDrop.id, spineIds[alternateIndex]);
         }
         const c1 = L.addNode('charge', 60, 320, '충전소 #1');
         L.addEdge(c1.id, spineIds[0]);
         const c2 = L.addNode('charge', W - 60, 320, '충전소 #2');
         L.addEdge(c2.id, spineIds[8]);
+        const park = L.addNode('park', 60, 250, '대기존 #1');
+        parkApproaches.forEach((id) => L.addEdge(park.id, id));
       }
     },
     fishbone: {
@@ -292,13 +332,20 @@
           L.addEdge(s.id, a.id);
           const p = L.addNode('pick', a.x - 40, a.y - 60, `피킹 #${i}`);
           L.addEdge(a.id, p.id);
+          const alternate = L.addNode('waypoint', a.x + 45, a.y + 35);
+          L.addEdge(p.id, alternate.id);
+          L.addEdge(alternate.id, spine[i - 1]);
         }
         for (let i = 0; i < 3; i++) {
           const d = L.addNode('drop', 760 + i * 90, 520, `출하 #${i + 1}`);
-          L.addEdge(d.id, spine[Math.min(6, 4 + i)]);
+          const nearIndex = Math.min(6, 4 + i);
+          L.addEdge(d.id, spine[nearIndex]);
+          L.addEdge(d.id, spine[nearIndex - 1]);
         }
         const c = L.addNode('charge', 70, 560, '충전소 #1');
         L.addEdge(c.id, spine[0]);
+        const park = L.addNode('park', 50, 460, '대기존 #1');
+        L.addEdge(park.id, spine[0]); L.addEdge(park.id, spine[1]);
       }
     }
   };
