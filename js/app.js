@@ -20,7 +20,7 @@
     params: M.defaultParams(),
     layout: new M.Layout(),
     sim: null, rend: null,
-    running: true, speed: 4, tool: 'select',
+    running: true, speed: 120, tool: 'select',
     lastFrame: 0, uiTick: 0, slowTick: 0,
     drag: null, dragFrom: null, panning: false, panStart: null,
     snap: true,
@@ -973,6 +973,7 @@
       $('#mainGrid').classList.toggle('right-wide');
       setTimeout(() => app.rend.resize(), 240);
     });
+    $('#btnCollapseLeft').addEventListener('click', () => toggleSide('left'));
     $('#btnCollapseRight').addEventListener('click', () => toggleSide('right'));
     $('#floatRight').addEventListener('click', () => toggleSide('right'));
     $('#floatLeft').addEventListener('click', () => toggleSide('left'));
@@ -1138,6 +1139,12 @@
     const on = g.classList.contains(cls);
     $('#' + side + 'Panel').classList.toggle('hidden', on);
     $('#float' + (side === 'left' ? 'Left' : 'Right')).classList.toggle('show', on);
+    if (side === 'left') {
+      const expanded = String(!on);
+      $('#btnCollapseLeft').setAttribute('aria-expanded', expanded);
+      $('#btnCollapseLeft').setAttribute('aria-label', `설계 파라미터 ${on ? '펼치기' : '접기'}`);
+      $('#floatLeft').setAttribute('aria-expanded', expanded);
+    }
     setTimeout(() => app.rend.resize(), 240);
   }
 

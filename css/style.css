@@ -243,6 +243,12 @@ input[type="checkbox"] { width: 14px; height: 14px; accent-color: var(--accent);
 .main.right-off #splitRight { display: none; }
 
 #leftPanel { grid-column: 1; }
+#leftPanel .tabs > div {
+  position: sticky;
+  right: 0;
+  flex: 0 0 auto;
+  background: var(--surface-2);
+}
 .sim-panel { grid-column: 3; }
 #rightPanel { grid-column: 5; }
 .layout-splitter {
@@ -758,6 +764,13 @@ td.strong { font-weight: 800; color: var(--text); }
   .panel { max-height: 70vh; }
   .sim-panel { max-height: none; }
   #floatLeft, #floatRight { display: none !important; }
+  #mainGrid.left-off #floatLeft {
+    display: block !important;
+    position: fixed;
+    left: 12px;
+    top: 50%;
+    transform: translateY(-50%);
+  }
   body { overflow: auto; }
   .app { height: auto; min-height: 100vh; }
 }

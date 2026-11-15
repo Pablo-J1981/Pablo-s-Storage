@@ -61,6 +61,10 @@
         <button class="tab" data-pane="p-energy">🔋 에너지</button>
         <button class="tab" data-pane="p-traffic">🧠 배차·교통</button>
         <button class="tab" data-pane="p-cost">💰 비용</button>
+        <div style="display:flex;align-items:center;gap:3px;padding:0 5px;margin-left:auto">
+          <button class="btn xs" id="btnCollapseLeft" title="설계 패널 접기"
+            aria-label="설계 파라미터 접기" aria-controls="leftPanel" aria-expanded="true">⇤</button>
+        </div>
       </nav>
 
       <div class="tab-body">
@@ -330,10 +334,10 @@
         <div class="tool-group">
           <span class="tool-label">배속</span>
           <button class="tool" data-speed="1">1×</button>
-          <button class="tool active" data-speed="4">4×</button>
+          <button class="tool" data-speed="4">4×</button>
           <button class="tool" data-speed="10">10×</button>
           <button class="tool" data-speed="30">30×</button>
-          <button class="tool" data-speed="120">120×</button>
+          <button class="tool active" data-speed="120">120×</button>
         </div>
         <div class="tool-group grow" style="justify-content:flex-end">
           <span class="tool-label" id="warmupNote">워밍업 이후 정상상태 지표가 안정화됩니다</span>
@@ -357,7 +361,8 @@
           </div>
         </div>
 
-        <button class="float-btn" id="floatLeft">▶ 파라미터</button>
+        <button class="float-btn" id="floatLeft" aria-label="설계 파라미터 펼치기"
+          aria-controls="leftPanel" aria-expanded="true">▶ 파라미터</button>
         <button class="float-btn" id="floatRight">◀ 분석</button>
       </div>
 
