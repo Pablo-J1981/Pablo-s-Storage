@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 
 const NODE_COLORS = {
   pick: 0x10b981,
@@ -36,17 +37,11 @@ class Renderer3D {
 
     this.mapGroup = null;
     this.grid = null;
-    this.edgeViews = [];
-    this.stationViews = [];
     this.robotGroup = new THREE.Group();
     this.scene.add(this.robotGroup);
     this.robotViews = [];
     this.graphVersion = -1;
     this.darkTheme = null;
-    this.heatLow = new THREE.Color(0x22c55e);
-    this.heatMiddle = new THREE.Color(0xfacc15);
-    this.heatHigh = new THREE.Color(0xef4444);
-    this.heatResult = new THREE.Color();
     this.bounds = { cx: 0, cz: 0, width: 400, depth: 300 };
 
     canvas.addEventListener('contextmenu', (event) => event.preventDefault());
@@ -160,50 +155,16 @@ class Renderer3D {
     const gridSize = Math.max(floorWidth, floorDepth);
     const divisions = Math.min(120, Math.max(10, Math.round(gridSize / 40)));
     this.grid = new THREE.GridHelper(gridSize, divisions, 0x94a3b8, 0xb8c3d1);
-    this.grid.position.set(this.bounds.cx, -0.95, this.bounds.cz);
+    this.grid.position.set(this.bounds.cx, -1.08, this.bounds.cz);
     this.grid.material.transparent = true;
     this.grid.material.opacity = 0.38;
     this.mapGroup.add(this.grid);
 
-    this.edgeViews = [];
-    layout.edges.forEach((edge) => {
-      const a = layout.node(edge.a), b = layout.node(edge.b);
-      if (!a || !b) return;
-      const dx = b.x - a.x, dz = b.y - a.y;
-      const length = Math.hypot(dx, dz);
-      const material = new THREE.MeshStandardMaterial({
-        color: 0x64748b,
-        roughness: 0.85
-      });
-      const road = new THREE.Mesh(
-        new THREE.BoxGeometry(length, 1.4, edge.lanes > 1 ? 34 : 24),
-        material
-      );
-      road.position.set((a.x + b.x) / 2, -0.15, (a.y + b.y) / 2);
-      road.rotation.y = -Math.atan2(dz, dx);
-      this.mapGroup.add(road);
-      const direction = this.sim.graph.effDir(edge);
-      if (direction !== 'both') {
-        const from = direction === 'ab' ? a : b;
-        const to = direction === 'ab' ? b : a;
-        const vector = new THREE.Vector3(to.x - from.x, 0, to.y - from.y).normalize();
-        const arrow = new THREE.Mesh(
-          new THREE.ConeGeometry(6, 14, 3),
-          new THREE.MeshStandardMaterial({ color: 0x0ea5e9, roughness: 0.55 })
-        );
-        arrow.position.set(
-          from.x + (to.x - from.x) * 0.68,
-          1.2,
-          from.y + (to.y - from.y) * 0.68
-        );
-        arrow.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), vector);
-        this.mapGroup.add(arrow);
-      }
-      this.edgeViews.push({ material, key: layout.edgeKey(edge.a, edge.b) });
+    const stationNodes = nodes.filter((node) => node.type !== 'waypoint');
+    this.mapGroup.add(this.createFloorLabels(stationNodes, floorWidth, floorDepth));
+    nodes.forEach((node) => {
+      if (node.type !== 'waypoint') this.addStation(node);
     });
-
-    this.stationViews = [];
-    nodes.forEach((node) => this.addStation(node));
     this.scene.add(this.mapGroup);
     this.graphVersion = this.sim.graph.version;
     this.fitToContent();
@@ -213,64 +174,107 @@ class Renderer3D {
     const group = new THREE.Group();
     group.position.set(node.x, 0, node.y);
     const color = NODE_COLORS[node.type] || NODE_COLORS.waypoint;
-
-    if (node.type === 'waypoint') {
-      const marker = new THREE.Mesh(
-        new THREE.CylinderGeometry(4, 5, 7, 12),
-        new THREE.MeshStandardMaterial({ color, roughness: 0.65 })
-      );
-      marker.position.y = 3;
-      group.add(marker);
-    } else {
-      const width = node.type === 'pick' ? 56 : 52;
-      const depth = node.type === 'charge' ? 32 : 38;
-      const base = new THREE.Mesh(
-        new THREE.BoxGeometry(width, 14, depth),
-        new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.78 })
-      );
-      base.position.y = 7;
-      group.add(base);
-
-      const top = new THREE.Mesh(
-        new THREE.BoxGeometry(width - 5, 3, depth - 5),
-        new THREE.MeshStandardMaterial({ color, roughness: 0.6 })
-      );
-      top.position.y = 15.5;
-      group.add(top);
-
-      const label = this.createLabel(node.name || node.id, color);
-      label.position.y = 34;
-      group.add(label);
-    }
+    const width = node.type === 'pick' ? 56 : 52;
+    const depth = node.type === 'charge' ? 32 : 38;
+    const outlineMaterial = new THREE.LineBasicMaterial({
+      color,
+      transparent: true,
+      opacity: 0.92
+    });
+    const outline = this.createRoundedWireframe(width, 12, depth, 5, outlineMaterial);
+    outline.position.y = 0.2;
+    group.add(outline);
 
     this.mapGroup.add(group);
-    this.stationViews.push({ node, group });
   }
 
-  createLabel(text, color) {
+  createRoundedWireframe(width, height, depth, radius, material) {
+    const halfWidth = width / 2;
+    const halfDepth = depth / 2;
+    const r = Math.min(radius, halfWidth, halfDepth);
+    const corners = [
+      { x: halfWidth - r, z: -halfDepth + r, start: -Math.PI / 2, end: 0 },
+      { x: halfWidth - r, z: halfDepth - r, start: 0, end: Math.PI / 2 },
+      { x: -halfWidth + r, z: halfDepth - r, start: Math.PI / 2, end: Math.PI },
+      { x: -halfWidth + r, z: -halfDepth + r, start: Math.PI, end: Math.PI * 1.5 }
+    ];
+    const points = [];
+    corners.forEach((corner) => {
+      for (let i = 0; i <= 6; i += 1) {
+        const angle = corner.start + (corner.end - corner.start) * i / 6;
+        points.push(new THREE.Vector3(
+          corner.x + Math.cos(angle) * r,
+          0,
+          corner.z + Math.sin(angle) * r
+        ));
+      }
+    });
+
+    const frame = new THREE.Group();
+    [0, height].forEach((y) => {
+      const geometry = new THREE.BufferGeometry().setFromPoints(
+        points.map((point) => new THREE.Vector3(point.x, y, point.z))
+      );
+      frame.add(new THREE.LineLoop(geometry, material));
+    });
+
+    const rails = [];
+    corners.forEach((corner) => {
+      const angle = (corner.start + corner.end) / 2;
+      const x = corner.x + Math.cos(angle) * r;
+      const z = corner.z + Math.sin(angle) * r;
+      rails.push(new THREE.Vector3(x, 0, z), new THREE.Vector3(x, height, z));
+    });
+    frame.add(new THREE.LineSegments(
+      new THREE.BufferGeometry().setFromPoints(rails),
+      material
+    ));
+    return frame;
+  }
+
+  createRoundedSolidBox(width, height, depth, radius, material) {
+    return new THREE.Mesh(
+      new RoundedBoxGeometry(width, height, depth, 4, radius),
+      material
+    );
+  }
+
+  createFloorLabels(nodes, floorWidth, floorDepth) {
     const canvas = document.createElement('canvas');
-    canvas.width = 512;
-    canvas.height = 128;
+    canvas.width = 2048;
+    canvas.height = Math.max(1024, Math.round(canvas.width * floorDepth / floorWidth));
     const ctx = canvas.getContext('2d');
-    ctx.fillStyle = `#${color.toString(16).padStart(6, '0')}`;
-    ctx.beginPath();
-    ctx.roundRect(8, 12, 496, 104, 24);
-    ctx.fill();
-    ctx.fillStyle = '#ffffff';
-    ctx.font = '700 52px Pretendard, sans-serif';
+    const fontSize = Math.max(50, Math.round(canvas.height * 48 / floorDepth));
+    ctx.font = `600 ${fontSize}px Pretendard, sans-serif`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(text, 256, 64, 470);
+    nodes.forEach((node) => {
+      const x = ((node.x - (this.bounds.cx - floorWidth / 2)) / floorWidth) * canvas.width;
+      const labelZ = node.y + 44;
+      const y = ((labelZ - (this.bounds.cz - floorDepth / 2)) / floorDepth) * canvas.height;
+      const text = node.id || node.name;
+      ctx.fillStyle = 'rgba(15, 23, 42, 0.96)';
+      ctx.fillText(text, x, y, canvas.width * 0.12);
+    });
 
     const texture = new THREE.CanvasTexture(canvas);
     texture.colorSpace = THREE.SRGBColorSpace;
-    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
-      map: texture,
-      transparent: true,
-      depthWrite: false
-    }));
-    sprite.scale.set(72, 18, 1);
-    return sprite;
+    const labels = new THREE.Mesh(
+      new THREE.PlaneGeometry(floorWidth, floorDepth),
+      new THREE.MeshBasicMaterial({
+        map: texture,
+        alphaTest: 0.1,
+        depthTest: false,
+        depthWrite: false,
+        polygonOffset: true,
+        polygonOffsetFactor: -1,
+        side: THREE.DoubleSide
+      })
+    );
+    labels.rotation.x = -Math.PI / 2;
+    labels.position.set(this.bounds.cx, -1.02, this.bounds.cz);
+    labels.renderOrder = 1;
+    return labels;
   }
 
   syncRobots() {
@@ -283,28 +287,41 @@ class Renderer3D {
     this.robotGroup.clear();
     this.robotViews = robots.map((robot) => {
       const group = new THREE.Group();
-      const bodyMaterial = new THREE.MeshStandardMaterial({ color: 0x2563eb, roughness: 0.5 });
-      const body = new THREE.Mesh(new THREE.BoxGeometry(28, 8, 19), bodyMaterial);
-      body.position.y = 4.6;
+      const bodyMaterial = new THREE.MeshStandardMaterial({
+        color: 0x2563eb,
+        roughness: 0.42,
+        metalness: 0.15
+      });
+      const body = this.createRoundedSolidBox(28, 8, 19, 4, bodyMaterial);
+      body.position.y = 5.5;
       group.add(body);
 
-      const front = new THREE.Mesh(
-        new THREE.BoxGeometry(7, 3, 5),
-        new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.5 })
+      const front = this.createRoundedSolidBox(
+        2,
+        3,
+        10,
+        0.9,
+        new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.38, metalness: 0.1 })
       );
-      front.position.set(15, 5, 0);
+      front.position.set(15, 5.5, 0);
       group.add(front);
 
-      const load = new THREE.Mesh(
-        new THREE.BoxGeometry(11, 6, 11),
-        new THREE.MeshStandardMaterial({ color: 0xfbbf24, roughness: 0.6 })
-      );
-      load.position.set(0, 10.6, 0);
+      const loadMaterial = new THREE.MeshStandardMaterial({
+        color: 0xfbbf24,
+        roughness: 0.5,
+        metalness: 0.05
+      });
+      const load = this.createRoundedSolidBox(12, 6, 12, 2.5, loadMaterial);
+      load.position.set(0, 13, 0);
       group.add(load);
 
-      const batteryMaterial = new THREE.MeshStandardMaterial({ color: 0x10b981 });
-      const battery = new THREE.Mesh(new THREE.BoxGeometry(16, 2, 3), batteryMaterial);
-      battery.position.set(0, 10, -9);
+      const batteryMaterial = new THREE.MeshStandardMaterial({
+        color: 0x10b981,
+        roughness: 0.45,
+        metalness: 0.1
+      });
+      const battery = this.createRoundedSolidBox(16, 2, 3, 0.9, batteryMaterial);
+      battery.position.set(0, 10.5, -8);
       group.add(battery);
 
       this.robotGroup.add(group);
@@ -314,18 +331,6 @@ class Renderer3D {
 
   updateDynamicState() {
     const state = window.AMR.STATE;
-    this.edgeViews.forEach((view) => {
-      const congestion = this.sim.graph.congestion.get(view.key) || 0;
-      const occupied = this.sim.edgeOccupancy.get(view.key);
-      if (congestion > 0.05) {
-        view.material.color.copy(this.heatColor(congestion));
-      } else if (occupied && occupied.size) {
-        view.material.color.setHex(0xf59e0b);
-      } else {
-        view.material.color.setHex(0x64748b);
-      }
-    });
-
     this.robotViews.forEach((view, index) => {
       const robot = this.sim.robots[index];
       if (!robot) return;
@@ -346,15 +351,9 @@ class Renderer3D {
     });
   }
 
-  heatColor(value) {
-    return value < 0.5
-      ? this.heatResult.copy(this.heatLow).lerp(this.heatMiddle, value * 2)
-      : this.heatResult.copy(this.heatMiddle).lerp(this.heatHigh, (value - 0.5) * 2);
-  }
-
   disposeObject(object) {
     object.traverse((child) => {
-      if (!child.isMesh && !child.isSprite) return;
+      if (!child.isMesh && !child.isSprite && !child.isLine) return;
       if (child.geometry) child.geometry.dispose();
       const materials = Array.isArray(child.material) ? child.material : [child.material];
       materials.forEach((material) => {
