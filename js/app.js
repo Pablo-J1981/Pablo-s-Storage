@@ -19,7 +19,8 @@
   const app = {
     params: M.defaultParams(),
     layout: new M.Layout(),
-    sim: null, rend: null,
+    sim: null, rend: null, rend3d: null,
+    view3D: false, view3DLoading: false,
     running: true, speed: 120, tool: 'select',
     lastFrame: 0, uiTick: 0, slowTick: 0,
     drag: null, dragFrom: null, panning: false, panStart: null,
@@ -85,6 +86,11 @@
       el.style.opacity = '0'; el.style.transform = 'translateY(10px)';
       setTimeout(() => el.remove(), 320);
     }, type === 'err' ? 4200 : 2600);
+  }
+
+  function resizeRenderers() {
+    if (app.rend) app.rend.resize();
+    if (app.rend3d) app.rend3d.resize();
   }
 
   /* ================= Undo / Redo (맵 편집) ================= */
@@ -197,7 +203,7 @@
 
     app.sim = new AMR.Simulation(app.layout, app.params);
     app.rend = new AMR.Renderer($('#simCanvas'), app.sim);
-    app.rend.resize();
+    resizeRenderers();
 
     const restored = loadState();
     if (!restored) {
@@ -208,7 +214,7 @@
     $('#selTraffic').value = app.params.traffic_model;
 
     bindEvents();
-    app.rend.resize();
+    resizeRenderers();
     app.rend.fitToContent();
     refreshStations();
     refreshAnalytics();
@@ -274,7 +280,12 @@
       for (let i = 0; i < steps; i++) app.sim.step(dt);
     }
 
-    app.rend.draw();
+    if (app.view3D && app.rend3d) {
+      app.rend3d.draw();
+      if (app.videoExport && app.videoExport.recording) app.rend.draw();
+    } else {
+      app.rend.draw();
+    }
 
     app.uiTick += real;
     if (app.uiTick >= 0.3) { app.uiTick = 0; refreshLive(); }
@@ -939,9 +950,19 @@
       app.rend.show[k] = !app.rend.show[k];
       b.classList.toggle('active', app.rend.show[k]);
     }));
-    $('#btnZoomIn').addEventListener('click', () => app.rend.zoom(1.22));
-    $('#btnZoomOut').addEventListener('click', () => app.rend.zoom(0.82));
-    $('#btnFit').addEventListener('click', () => app.rend.fitToContent());
+    $('#btnZoomIn').addEventListener('click', () => {
+      if (app.view3D) { if (app.rend3d) app.rend3d.zoom(1.22); }
+      else app.rend.zoom(1.22);
+    });
+    $('#btnZoomOut').addEventListener('click', () => {
+      if (app.view3D) { if (app.rend3d) app.rend3d.zoom(0.82); }
+      else app.rend.zoom(0.82);
+    });
+    $('#btnFit').addEventListener('click', () => {
+      if (app.view3D) { if (app.rend3d) app.rend3d.fitToContent(); }
+      else app.rend.fitToContent();
+    });
+    $('#btn3DView').addEventListener('click', toggle3DView);
 
     /* --- 도구 --- */
     $$('[data-tool]').forEach((b) => b.addEventListener('click', () => setTool(b.dataset.tool)));
@@ -971,7 +992,7 @@
     /* --- 패널 --- */
     $('#btnWide').addEventListener('click', () => {
       $('#mainGrid').classList.toggle('right-wide');
-      setTimeout(() => app.rend.resize(), 240);
+      setTimeout(resizeRenderers, 240);
     });
     $('#btnCollapseSettings').addEventListener('click', toggleSide);
     $('#btnCollapseRight').addEventListener('click', toggleSide);
@@ -1101,7 +1122,7 @@
       if (main.dataset.panelWidthsCustomized === 'true') {
         setPanelWidth(readPanelWidth());
       }
-      app.rend.resize();
+      resizeRenderers();
     });
   }
 
@@ -1119,12 +1140,63 @@
     b.classList.toggle('primary', app.running);
   }
 
+  function setView3D(enabled) {
+    app.view3D = enabled;
+    $('#canvasWrap').classList.toggle('view-3d', enabled);
+    const button = $('#btn3DView');
+    button.innerHTML = enabled ? '↩ 2D 편집' : '🧊 3D 보기';
+    button.classList.toggle('active', enabled);
+    button.setAttribute('aria-pressed', String(enabled));
+    $$('[data-map-edit]').forEach((control) => { control.disabled = enabled; });
+    if (enabled) {
+      app.drag = null;
+      app.dragFrom = null;
+      app.panning = false;
+      closeInspector();
+    }
+    resizeRenderers();
+  }
+
+  async function toggle3DView() {
+    if (app.view3D) {
+      setView3D(false);
+      toast('2D 편집 화면으로 돌아왔습니다.');
+      return;
+    }
+
+    setView3D(true);
+    const button = $('#btn3DView');
+    button.disabled = true;
+    app.view3DLoading = true;
+    try {
+      if (!app.rend3d) {
+        if (typeof AMR.loadRenderer3D !== 'function') {
+          throw new Error('3D 모듈 로더를 불러오지 못했습니다. 페이지를 새로고침한 뒤 다시 시도해 주세요.');
+        }
+        app.rend3d = await AMR.loadRenderer3D($('#simCanvas3D'), app.sim);
+      }
+      app.rend3d.invalidateMap();
+      resizeRenderers();
+      app.rend3d.fitToContent();
+      app.rend3d.draw();
+      toast('3D 보기 전용 모드입니다. 맵 편집은 2D 화면에서만 가능합니다.', 'ok');
+    } catch (error) {
+      setView3D(false);
+      const detail = error && error.message ? `: ${esc(error.message)}` : '';
+      toast(`3D 보기를 초기화하지 못했습니다${detail}`, 'err');
+    } finally {
+      app.view3DLoading = false;
+      button.disabled = false;
+    }
+  }
+
   function setSpeed(s) {
     app.speed = s;
     $$('[data-speed]').forEach((b) => b.classList.toggle('active', +b.dataset.speed === s));
   }
 
   function setTool(t) {
+    if (app.view3D) return;
     app.tool = t;
     app.rend.edgeStart = null;
     app.rend.ghost = null;
@@ -1150,7 +1222,7 @@
     $('#btnCollapseSettings').setAttribute('aria-label', `${activeLabel} 패널 ${actionLabel}`);
     $('#btnCollapseRight').setAttribute('aria-label', `${activeLabel} 패널 ${actionLabel}`);
     $('#floatRight').setAttribute('aria-label', `우측 ${activeLabel} 패널 ${actionLabel}`);
-    setTimeout(() => app.rend.resize(), 240);
+    setTimeout(resizeRenderers, 240);
   }
 
   function setPanelView(view) {
@@ -1170,7 +1242,7 @@
     $('#btnCollapseSettings').setAttribute('aria-label', `${activeLabel} 패널 ${actionLabel}`);
     $('#btnCollapseRight').setAttribute('aria-label', `${activeLabel} 패널 ${actionLabel}`);
     $('#floatRight').setAttribute('aria-label', `우측 ${activeLabel} 패널 ${actionLabel}`);
-    setTimeout(() => app.rend.resize(), 240);
+    setTimeout(resizeRenderers, 240);
   }
 
   function readPanelWidth() {
@@ -1214,7 +1286,7 @@
       if (resizeFrame) return;
       resizeFrame = requestAnimationFrame(() => {
         resizeFrame = 0;
-        if (app.rend) app.rend.resize();
+        resizeRenderers();
       });
     };
 
@@ -1577,6 +1649,13 @@
   /* ================= 키보드 ================= */
   function bindKeyboard() {
     document.addEventListener('keydown', (e) => {
+      if (app.view3D) {
+        if (e.key === 'Escape' && !app.view3DLoading) {
+          e.preventDefault();
+          setView3D(false);
+        }
+        return;
+      }
       if (/input|select|textarea/i.test(e.target.tagName)) return;
       const k = e.key.toLowerCase();
 
@@ -1745,6 +1824,7 @@
     const button = $('#btnVideoExport');
     const exporter = new AMR.VideoExporter();
     app.videoExport = exporter;
+    if (app.view3D) app.rend.draw();
     const started = exporter.start({
       mapCanvas: $('#simCanvas'),
       getSnapshot: () => ({ sim: app.sim, layoutName: app.layout.name }),

@@ -11,6 +11,14 @@
 <link href="https://fonts.googleapis.com/css2?family=Nanum+Gothic:wght@400;700;800&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="css/style.css">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🤖</text></svg>">
+<script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.187.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.187.0/examples/jsm/"
+    }
+  }
+</script>
 </head>
 <body class="theme-hanwha">
 
@@ -34,10 +42,10 @@
     </div>
 
     <div class="topbar-actions">
-      <select id="presetSelect" style="width:auto;min-width:168px" aria-label="레이아웃 프리셋"></select>
-      <button class="btn primary" id="btnLoadPreset">🏭 <span class="lbl">맵 적용</span></button>
+      <select id="presetSelect" data-map-edit style="width:auto;min-width:168px" aria-label="레이아웃 프리셋"></select>
+      <button class="btn primary" id="btnLoadPreset" data-map-edit>🏭 <span class="lbl">맵 적용</span></button>
       <button class="btn" id="btnSave">💾 <span class="lbl">저장</span></button>
-      <button class="btn" id="btnLoad">📂 <span class="lbl">불러오기</span></button>
+      <button class="btn" id="btnLoad" data-map-edit>📂 <span class="lbl">불러오기</span></button>
       <button class="btn" id="btnReport">📑 <span class="lbl">리포트</span></button>
       <button class="btn" id="btnVideoExport" title="주요 지표를 합성한 WebM 결과 영상 녹화 시작/종료">🎥 <span class="lbl">영상</span></button>
       <button class="btn" id="btnHelp" title="사용 가이드">❓</button>
@@ -294,34 +302,35 @@
       <div class="toolbar">
         <div class="tool-group">
           <span class="tool-label">편집</span>
-          <button class="tool active" data-tool="select" title="선택·드래그 이동 / 통로 클릭 시 차선·방향 편집 (V)">👆</button>
-          <button class="tool" data-tool="pan" title="화면 이동 (H, 우클릭 드래그도 가능)">✋</button>
-          <button class="tool" data-tool="pick" title="피킹 스테이션 배치 (P)">🟢 픽업</button>
-          <button class="tool" data-tool="drop" title="드롭 스테이션 배치 (D)">🟠 드롭</button>
-          <button class="tool" data-tool="charge" title="충전소 배치 (C)">⚡ 충전</button>
-          <button class="tool" data-tool="park" title="대기존 배치 (K)">🅿 대기</button>
-          <button class="tool" data-tool="waypoint" title="경유 노드 배치 (N)">⚪ 노드</button>
-          <button class="tool" data-tool="edge" title="노드를 차례로 클릭해 통로를 연속 생성 (E, Shift=일방통행, 빈 곳 클릭=종료)">🔗 연결</button>
-          <button class="tool" data-tool="delete" title="노드/통로 삭제 (X)">🗑</button>
+          <button class="tool active" data-tool="select" data-map-edit title="선택·드래그 이동 / 통로 클릭 시 차선·방향 편집 (V)">👆</button>
+          <button class="tool" data-tool="pan" data-map-edit title="화면 이동 (H, 우클릭 드래그도 가능)">✋</button>
+          <button class="tool" data-tool="pick" data-map-edit title="피킹 스테이션 배치 (P)">🟢 픽업</button>
+          <button class="tool" data-tool="drop" data-map-edit title="드롭 스테이션 배치 (D)">🟠 드롭</button>
+          <button class="tool" data-tool="charge" data-map-edit title="충전소 배치 (C)">⚡ 충전</button>
+          <button class="tool" data-tool="park" data-map-edit title="대기존 배치 (K)">🅿 대기</button>
+          <button class="tool" data-tool="waypoint" data-map-edit title="경유 노드 배치 (N)">⚪ 노드</button>
+          <button class="tool" data-tool="edge" data-map-edit title="노드를 차례로 클릭해 통로를 연속 생성 (E, Shift=일방통행, 빈 곳 클릭=종료)">🔗 연결</button>
+          <button class="tool" data-tool="delete" data-map-edit title="노드/통로 삭제 (X)">🗑</button>
         </div>
         <div class="tool-group">
-          <button class="tool" id="btnUndo" title="실행 취소 (Ctrl+Z)">↩</button>
-          <button class="tool" id="btnRedo" title="다시 실행 (Ctrl+Y)">↪</button>
-          <button class="tool active" id="btnSnap" title="격자 스냅 20px (Alt를 누르면 일시 해제)">🧲 스냅</button>
+          <button class="tool" id="btnUndo" data-map-edit title="실행 취소 (Ctrl+Z)">↩</button>
+          <button class="tool" id="btnRedo" data-map-edit title="다시 실행 (Ctrl+Y)">↪</button>
+          <button class="tool active" id="btnSnap" data-map-edit title="격자 스냅 20px (Alt를 누르면 일시 해제)">🧲 스냅</button>
         </div>
         <div class="tool-group">
           <span class="tool-label">보기</span>
           <button class="tool" id="btnZoomIn" title="확대">🔍+</button>
           <button class="tool" id="btnZoomOut" title="축소">🔍−</button>
           <button class="tool" id="btnFit" title="전체 맞춤 (F)">⤢ 맞춤</button>
+          <button class="tool" id="btn3DView" aria-pressed="false" title="3D 보기 전용 (편집은 2D에서만 가능)">🧊 3D 보기</button>
           <button class="tool active" data-view="heat" title="혼잡 히트맵">🔥 혼잡</button>
           <button class="tool active" data-view="dist" title="구간 거리 라벨">📏 거리</button>
           <button class="tool" data-view="trails" title="주행 경로 표시">〰 경로</button>
           <button class="tool active" data-view="grid" title="격자">▦</button>
         </div>
         <div class="tool-group">
-          <button class="tool" id="btnAutoLink" title="가까운 노드를 자동 연결">🪄 자동연결</button>
-          <button class="tool" id="btnClearMap" title="맵 비우기">🧹 초기화</button>
+          <button class="tool" id="btnAutoLink" data-map-edit title="가까운 노드를 자동 연결">🪄 자동연결</button>
+          <button class="tool" id="btnClearMap" data-map-edit title="맵 비우기">🧹 초기화</button>
         </div>
       </div>
 
@@ -346,6 +355,10 @@
 
       <div class="canvas-wrap" id="canvasWrap">
         <canvas id="simCanvas" aria-label="공장 레이아웃 시뮬레이션 맵"></canvas>
+        <canvas id="simCanvas3D" aria-label="공장 레이아웃 3D 보기 전용"></canvas>
+        <div class="canvas-3d-note" id="canvas3DNote">
+          보기 전용 · 드래그 회전 · 휠 확대/축소 · 우클릭 드래그 이동 · <kbd>Esc</kbd> 2D 편집으로 복귀
+        </div>
 
         <div class="canvas-float">
           <div class="canvas-badge">⏱ <b id="hudTime">00:00:00</b> · <span id="hudSpeed">4×</span></div>
@@ -690,6 +703,7 @@
         <tbody>
           <tr><td class="strong">휠 스크롤</td><td>커서 기준 확대/축소</td></tr>
           <tr><td class="strong">우클릭 드래그</td><td>화면 이동 (Pan)</td></tr>
+          <tr><td class="strong">🧊 3D 보기</td><td>보기 전용 3D 화면 (드래그 회전, 휠 확대/축소, 우클릭 드래그 이동, Esc로 2D 복귀)</td></tr>
           <tr><td class="strong">선택 도구 + 드래그</td><td>노드 위치 이동 (🧲 스냅 켜짐 시 20px 격자, Alt로 일시 해제)</td></tr>
           <tr><td class="strong">노드 클릭</td><td>인스펙터에서 이름·수요 가중치 바로 편집</td></tr>
           <tr><td class="strong">통로 클릭</td><td>인스펙터에서 통행 방향·차선 수·속도 계수 편집</td></tr>
@@ -740,5 +754,6 @@
 <script src="js/charts.js"></script>
 <script src="js/video-export.js"></script>
 <script src="js/app.js"></script>
+<script src="js/renderer3d-loader.js"></script>
 </body>
 </html>

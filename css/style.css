@@ -469,6 +469,13 @@ input[type="checkbox"] { width: 14px; height: 14px; accent-color: var(--accent);
   background: var(--accent); color: #fff; border-color: var(--accent);
   box-shadow: 0 1px 5px rgba(243, 115, 33, .35);
 }
+.tool[data-map-edit]:disabled,
+.btn[data-map-edit]:disabled {
+  opacity: .38;
+  cursor: not-allowed;
+  filter: grayscale(.65);
+  box-shadow: none;
+}
 
 .canvas-wrap {
   position: relative; flex: 1; min-height: 240px;
@@ -476,6 +483,39 @@ input[type="checkbox"] { width: 14px; height: 14px; accent-color: var(--accent);
   overflow: hidden;
 }
 #simCanvas { display: block; width: 100%; height: 100%; }
+#simCanvas3D {
+  display: none;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+}
+.canvas-wrap.view-3d #simCanvas { display: none; }
+.canvas-wrap.view-3d #simCanvas3D { display: block; }
+.canvas-3d-note {
+  display: none;
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  z-index: 4;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  color: var(--text-dim);
+  font-size: 10px;
+  pointer-events: none;
+  backdrop-filter: blur(8px);
+}
+.canvas-wrap.view-3d .canvas-3d-note { display: block; }
+.canvas-3d-note kbd {
+  padding: 1px 4px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text);
+  font: inherit;
+}
 
 .canvas-float {
   position: absolute; top: 9px; right: 9px;
